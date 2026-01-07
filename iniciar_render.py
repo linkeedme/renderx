@@ -3749,13 +3749,27 @@ class VSLEngine:
                 # Input 1: VSL
                 cmd.extend(["-i", vsl_path])
                 
-                # Input 2: Silêncio (sempre adicionar para garantir áudio)
-                cmd.extend(["-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=48000"])
+                # Inputs de silêncio separados para cada parte que precisar
+                # (FFmpeg não permite reutilizar o mesmo stream múltiplas vezes)
+                silence_input_idx = 2
+                silence_inputs_needed = 0
+                if not base_has_audio:
+                    if has_part1:
+                        silence_inputs_needed += 1
+                    if has_part2:
+                        silence_inputs_needed += 1
+                if not vsl_has_audio:
+                    silence_inputs_needed += 1
+                
+                # Adicionar inputs de silêncio necessários
+                for _ in range(max(1, silence_inputs_needed)):
+                    cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
                 
                 # Construir filter_complex
                 filter_parts = []
                 video_concat_inputs = []
                 audio_concat_inputs = []
+                current_silence_idx = 2  # Começa no input 2
                 
                 # Parte 1: Início do vídeo (0 até start_time_sec)
                 if has_part1:
@@ -3764,7 +3778,8 @@ class VSLEngine:
                         filter_parts.append(f"[0:a]atrim=0:{start_time_sec},asetpts=PTS-STARTPTS,aresample=48000[a0]")
                     else:
                         # Vídeo base não tem áudio - usar silêncio
-                        filter_parts.append(f"[2:a]atrim=0:{start_time_sec},asetpts=PTS-STARTPTS[a0]")
+                        filter_parts.append(f"[{current_silence_idx}:a]atrim=0:{start_time_sec},asetpts=PTS-STARTPTS[a0]")
+                        current_silence_idx += 1
                     video_concat_inputs.append("[v0]")
                     audio_concat_inputs.append("[a0]")
                 
@@ -3776,8 +3791,9 @@ class VSLEngine:
                     filter_parts.append(f"[1:a]aresample=48000,asetpts=PTS-STARTPTS[a1]")
                     audio_concat_inputs.append("[a1]")
                 else:
-                    # Usar silêncio do input 2, cortado para duração da VSL
-                    filter_parts.append(f"[2:a]atrim=0:{vsl_duration},asetpts=PTS-STARTPTS[a1]")
+                    # Usar silêncio, cortado para duração da VSL
+                    filter_parts.append(f"[{current_silence_idx}:a]atrim=0:{vsl_duration},asetpts=PTS-STARTPTS[a1]")
+                    current_silence_idx += 1
                     audio_concat_inputs.append("[a1]")
                 
                 # Parte 2: Continuação do vídeo (de start_time_sec até o fim)
@@ -3788,7 +3804,8 @@ class VSLEngine:
                     else:
                         # Vídeo base não tem áudio - usar silêncio
                         remaining_duration = base_duration - start_time_sec
-                        filter_parts.append(f"[2:a]atrim=0:{remaining_duration},asetpts=PTS-STARTPTS[a2]")
+                        filter_parts.append(f"[{current_silence_idx}:a]atrim=0:{remaining_duration},asetpts=PTS-STARTPTS[a2]")
+                        current_silence_idx += 1
                     video_concat_inputs.append("[v2]")
                     audio_concat_inputs.append("[a2]")
                 

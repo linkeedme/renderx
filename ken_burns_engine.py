@@ -101,7 +101,7 @@ class KenBurnsEngine:
 
     def smart_crop_16x9(self, img: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
         """
-        Crop centralizado para 16:9, sem bordas pretas.
+        Crop centralizado para 16:9, sem bordas pretas e sem esticar a imagem.
 
         Args:
             img: Imagem OpenCV (BGR)
@@ -109,26 +109,59 @@ class KenBurnsEngine:
             target_h: Altura alvo
 
         Returns:
-            Imagem cortada e redimensionada
+            Imagem cortada e redimensionada mantendo proporção
         """
         h, w = img.shape[:2]
+        
+        # Evitar divisão por zero
+        if h == 0 or w == 0:
+            return np.zeros((target_h, target_w, 3), dtype=np.uint8)
+        
         target_ratio = target_w / target_h  # 16:9 = 1.777...
         current_ratio = w / h
 
         if current_ratio > target_ratio:
             # Imagem mais larga que 16:9 - cortar laterais
             new_w = int(h * target_ratio)
+            new_w = min(new_w, w)  # Garantir que não exceda a largura original
             x_offset = (w - new_w) // 2
             img_cropped = img[:, x_offset:x_offset + new_w]
         else:
             # Imagem mais alta que 16:9 - cortar topo/base
             new_h = int(w / target_ratio)
+            new_h = min(new_h, h)  # Garantir que não exceda a altura original
             y_offset = (h - new_h) // 2
             img_cropped = img[y_offset:y_offset + new_h, :]
+        
+        # Verificar se o crop é válido
+        crop_h, crop_w = img_cropped.shape[:2]
+        if crop_h == 0 or crop_w == 0:
+            # Fallback: usar imagem original e redimensionar com padding
+            return self._resize_with_letterbox(img, target_w, target_h)
 
-        # Redimensionar para resolução alvo com LANCZOS4
+        # Redimensionar para resolução alvo com LANCZOS4 (melhor qualidade)
         return cv2.resize(img_cropped, (target_w, target_h),
                          interpolation=cv2.INTER_LANCZOS4)
+    
+    def _resize_with_letterbox(self, img: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+        """
+        Redimensiona mantendo proporção e adiciona barras pretas se necessário.
+        Usado como fallback quando o crop não é possível.
+        """
+        h, w = img.shape[:2]
+        scale = min(target_w / w, target_h / h)
+        new_w = int(w * scale)
+        new_h = int(h * scale)
+        
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+        
+        # Criar canvas preto e centralizar
+        canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+        x_offset = (target_w - new_w) // 2
+        y_offset = (target_h - new_h) // 2
+        canvas[y_offset:y_offset + new_h, x_offset:x_offset + new_w] = resized
+        
+        return canvas
 
     # =========================================================================
     # EFEITOS BÁSICOS: ZOOM

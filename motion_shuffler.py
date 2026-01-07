@@ -18,23 +18,61 @@ from ken_burns_engine import KenBurnsEngine
 class MotionShuffler:
     """Gerenciador de shuffle de efeitos sem repetição."""
 
-    def __init__(self, log_callback=None):
+    def __init__(self, log_callback=None, enabled_effects: List[str] = None):
         """
         Inicializa o shuffler.
 
         Args:
             log_callback: Função opcional para logging (message, level)
+            enabled_effects: Lista de letras (A-N) dos efeitos habilitados.
+                           Se None ou vazio, usa todos os efeitos.
         """
         self.log = log_callback or (lambda msg, level="INFO": print(f"[{level}] {msg}"))
-        self.all_effects = KenBurnsEngine.ANIMATION_TYPES.copy()
         self.effect_map = KenBurnsEngine.EFFECT_MAP.copy()
+        
+        # Configurar efeitos habilitados
+        if enabled_effects and len(enabled_effects) >= 2:
+            # Converter letras para nomes de efeitos
+            self.all_effects = [
+                self.effect_map[letter] 
+                for letter in enabled_effects 
+                if letter in self.effect_map
+            ]
+            # Garantir mínimo de 2 efeitos
+            if len(self.all_effects) < 2:
+                self.all_effects = KenBurnsEngine.ANIMATION_TYPES.copy()
+        else:
+            self.all_effects = KenBurnsEngine.ANIMATION_TYPES.copy()
+        
         self.last_effect = None
         self.used_effects_in_video = []
+        
+        self.log(f"MotionShuffler: {len(self.all_effects)} efeitos habilitados", "DEBUG")
 
     def reset(self):
         """Reseta o estado para um novo vídeo."""
         self.last_effect = None
         self.used_effects_in_video = []
+    
+    def set_enabled_effects(self, enabled_effects: List[str]):
+        """
+        Atualiza a lista de efeitos habilitados.
+        
+        Args:
+            enabled_effects: Lista de letras (A-N) dos efeitos habilitados.
+        """
+        if enabled_effects and len(enabled_effects) >= 2:
+            self.all_effects = [
+                self.effect_map[letter] 
+                for letter in enabled_effects 
+                if letter in self.effect_map
+            ]
+            if len(self.all_effects) < 2:
+                self.all_effects = KenBurnsEngine.ANIMATION_TYPES.copy()
+        else:
+            self.all_effects = KenBurnsEngine.ANIMATION_TYPES.copy()
+        
+        self.log(f"Efeitos atualizados: {len(self.all_effects)} habilitados", "DEBUG")
 
     def get_next_effect(self, exclude_last: bool = True) -> str:
         """
@@ -150,15 +188,20 @@ class MotionShuffler:
 class ImageEffectAssigner:
     """Atribui efeitos a imagens mantendo ordem e shuffling de efeitos."""
 
-    def __init__(self, log_callback=None):
+    def __init__(self, log_callback=None, enabled_effects: List[str] = None):
         """
         Inicializa o atribuidor.
 
         Args:
             log_callback: Função opcional para logging
+            enabled_effects: Lista de letras (A-N) dos efeitos habilitados
         """
         self.log = log_callback or (lambda msg, level="INFO": print(f"[{level}] {msg}"))
-        self.shuffler = MotionShuffler(log_callback)
+        self.shuffler = MotionShuffler(log_callback, enabled_effects)
+    
+    def set_enabled_effects(self, enabled_effects: List[str]):
+        """Atualiza os efeitos habilitados."""
+        self.shuffler.set_enabled_effects(enabled_effects)
 
     def assign_effects_to_images(self, image_paths: List[str]) -> List[dict]:
         """

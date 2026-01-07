@@ -1495,8 +1495,12 @@ class FinalSlideshowEngine:
         """
         image_blocks = []
         
-        # Resetar motion shuffler para este vídeo
+        # Resetar motion shuffler para este vídeo e configurar efeitos habilitados
         self.motion_shuffler.reset()
+        enabled_effects = config.get("enabled_effects", None)
+        if enabled_effects:
+            self.motion_shuffler.set_enabled_effects(enabled_effects)
+            self.log(f"Efeitos habilitados: {len(enabled_effects)} ({', '.join(enabled_effects)})", "DEBUG")
         
         # Carregar prompt externo se configurado
         prompt_file = config.get("prompt_file", "")
@@ -3243,17 +3247,16 @@ class VSLEngine:
             
             # Redimensionar VSL para corresponder à resolução do vídeo base
             # Adicionar fade in e fade out para transições suaves
-            # Fade in com duração estendida (0.1s a mais), fade out termina 0.1s antes do fim
             # 
-            # IMPORTANTE: Usar setpts para sincronizar o VSL com o tempo do vídeo base
-            # O VSL começa do frame 0 mas deve aparecer em start_time_sec do vídeo base
+            # MÉTODO CORRETO: Usar 'enable' no overlay com condição de tempo
+            # Isso garante que o VSL apareça apenas no intervalo especificado
+            # sem usar itsoffset que pode causar problemas de sincronização
             filter_complex = (
                 f"[1:v]scale={base_width}:{base_height}:force_original_aspect_ratio=decrease,"
                 f"pad={base_width}:{base_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
                 f"fade=t=in:st=0:d={fade_in_duration}:alpha=1,"
-                f"fade=t=out:st={fade_out_start}:d={fade_duration}:alpha=1,"
-                f"setpts=PTS+{start_time_sec}/TB[vsl_scaled];"
-                f"[0:v][vsl_scaled]overlay=0:0:eof_action=pass:shortest=1[outv]"
+                f"fade=t=out:st={fade_out_start}:d={fade_duration}:alpha=1[vsl_scaled];"
+                f"[0:v][vsl_scaled]overlay=0:0:enable='between(t,{start_time_sec},{overlay_end_time})':eof_action=pass[outv]"
             )
             
             self.log(f"Filtro VSL: overlay de {start_time_sec:.2f}s a {overlay_end_time:.2f}s", "DEBUG")
@@ -3261,7 +3264,6 @@ class VSLEngine:
             cmd = [
                 "ffmpeg", "-y",
                 "-i", video_path,
-                "-itsoffset", str(start_time_sec),  # Offset do VSL para começar no tempo correto
                 "-i", vsl_path,
                 "-filter_complex", filter_complex,
                 "-map", "[outv]",
@@ -3843,6 +3845,31 @@ class FinalSlideshowApp(ctk.CTk):
         self.use_varied_animations_var = ctk.BooleanVar(value=self.config.get("use_varied_animations", True))
         self.pan_amount_var = ctk.DoubleVar(value=self.config.get("pan_amount", 0.2))
         
+        # Seleção de efeitos de animação (14 efeitos disponíveis)
+        # Mapeamento: A-N para os 14 efeitos Ken Burns
+        self.EFFECT_NAMES = {
+            "A": "Pan Esq→Dir",
+            "B": "Pan Dir→Esq", 
+            "C": "Pan Cima→Baixo",
+            "D": "Pan Baixo→Cima",
+            "E": "Pan Esq→Dir + Zoom In",
+            "F": "Pan Dir→Esq + Zoom In",
+            "G": "Pan Cima→Baixo + Zoom In",
+            "H": "Pan Baixo→Cima + Zoom In",
+            "I": "Pan Esq→Dir + Zoom Out",
+            "J": "Pan Dir→Esq + Zoom Out",
+            "K": "Pan Cima→Baixo + Zoom Out",
+            "L": "Pan Baixo→Cima + Zoom Out",
+            "M": "Rotação Leve",
+            "N": "Punch-In"
+        }
+        # Carregar efeitos habilitados do config (padrão: todos habilitados)
+        default_effects = list(self.EFFECT_NAMES.keys())
+        enabled_effects = self.config.get("enabled_effects", default_effects)
+        self.effect_vars = {}
+        for letter in self.EFFECT_NAMES.keys():
+            self.effect_vars[letter] = ctk.BooleanVar(value=letter in enabled_effects)
+        
         # Pipeline SRT v3.1
         self.subtitle_mode_var = ctk.StringVar(value=self.config.get("subtitle_mode", "full"))
         self.swap_every_n_cues_var = ctk.IntVar(value=self.config.get("swap_every_n_cues", 3))
@@ -3996,6 +4023,7 @@ class FinalSlideshowApp(ctk.CTk):
             "whisk_parallel_workers": self.whisk_workers_var.get(),  # Workers paralelos (0 = auto)
             "selected_prompt_id": self.get_selected_prompt_id(),  # Prompt de imagem selecionado
             "use_varied_animations": self.use_varied_animations_var.get(),
+            "enabled_effects": self.get_enabled_effects(),  # Efeitos de animação selecionados
             "pan_amount": self.pan_amount_var.get(),
             # Pipeline SRT v3.1
             "subtitle_mode": self.subtitle_mode_var.get(),
@@ -4435,16 +4463,30 @@ class FinalSlideshowApp(ctk.CTk):
         anim_frame = ctk.CTkFrame(common_frame, fg_color="transparent")
         anim_frame.pack(fill="x", pady=(10, 0))
         ctk.CTkCheckBox(
-            anim_frame, text="Animações variadas (14 efeitos, sem repetir)",
+            anim_frame, text="Animações variadas (sem repetir em sequência)",
             variable=self.use_varied_animations_var,
             fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
             text_color=CORES["text"],
             command=self.toggle_zoom_options
         ).pack(side="left")
         
+        # Botão para abrir seleção de efeitos
+        ctk.CTkButton(
+            anim_frame, text="Selecionar Efeitos", width=120,
+            fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
+            command=self.open_effects_selector
+        ).pack(side="left", padx=(15, 0))
+        
+        # Label mostrando quantos efeitos estão selecionados
+        self.effects_count_label = ctk.CTkLabel(
+            anim_frame, text=f"({sum(v.get() for v in self.effect_vars.values())}/14)",
+            text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
+        )
+        self.effects_count_label.pack(side="left", padx=(5, 0))
+        
         ctk.CTkLabel(
             common_frame,
-            text="Pan, Zoom, Pan+Zoom, Rotação leve, Punch-in — corte seco entre imagens",
+            text="Selecione quais efeitos entrarão na randomização (mínimo 2)",
             text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
         ).pack(anchor="w", pady=(2, 0))
 
@@ -4708,6 +4750,146 @@ class FinalSlideshowApp(ctk.CTk):
                 self.zoom_options_frame.pack(fill="x", padx=10, pady=5, after=self.traditional_mode_frame.winfo_children()[0])
         except:
             pass
+    
+    def open_effects_selector(self):
+        """Abre janela para selecionar quais efeitos usar na randomização."""
+        # Criar janela de seleção
+        selector_window = ctk.CTkToplevel(self)
+        selector_window.title("Selecionar Efeitos de Animação")
+        selector_window.geometry("500x520")
+        selector_window.resizable(False, False)
+        selector_window.transient(self)
+        selector_window.grab_set()
+        
+        # Centralizar janela
+        selector_window.update_idletasks()
+        x = (selector_window.winfo_screenwidth() - 500) // 2
+        y = (selector_window.winfo_screenheight() - 520) // 2
+        selector_window.geometry(f"+{x}+{y}")
+        
+        # Configurar cores
+        selector_window.configure(fg_color=CORES["bg_dark"])
+        
+        # Título
+        ctk.CTkLabel(
+            selector_window, 
+            text="Selecione os Efeitos para Randomização",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=CORES["accent"]
+        ).pack(pady=(15, 5))
+        
+        ctk.CTkLabel(
+            selector_window,
+            text="Mínimo 2 efeitos. Mesmo com 2, haverá randomização.",
+            text_color=CORES["text_dim"],
+            font=ctk.CTkFont(size=11)
+        ).pack(pady=(0, 15))
+        
+        # Frame para checkboxes (2 colunas)
+        effects_frame = ctk.CTkFrame(selector_window, fg_color=CORES["bg_card"])
+        effects_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # Criar checkboxes para cada efeito
+        row = 0
+        col = 0
+        for letter, name in self.EFFECT_NAMES.items():
+            cb = ctk.CTkCheckBox(
+                effects_frame,
+                text=f"{letter}: {name}",
+                variable=self.effect_vars[letter],
+                fg_color=CORES["accent"],
+                hover_color=CORES["accent_hover"],
+                text_color=CORES["text"],
+                font=ctk.CTkFont(size=12),
+                command=lambda: self.update_effects_count()
+            )
+            cb.grid(row=row, column=col, sticky="w", padx=15, pady=8)
+            col += 1
+            if col > 1:
+                col = 0
+                row += 1
+        
+        # Botões de ação rápida
+        buttons_frame = ctk.CTkFrame(selector_window, fg_color="transparent")
+        buttons_frame.pack(fill="x", padx=20, pady=10)
+        
+        ctk.CTkButton(
+            buttons_frame, text="Selecionar Todos", width=120,
+            fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
+            command=lambda: self.set_all_effects(True)
+        ).pack(side="left", padx=5)
+        
+        ctk.CTkButton(
+            buttons_frame, text="Desmarcar Todos", width=120,
+            fg_color=CORES["bg_input"], hover_color=CORES["accent_hover"],
+            command=lambda: self.set_all_effects(False)
+        ).pack(side="left", padx=5)
+        
+        ctk.CTkButton(
+            buttons_frame, text="Apenas Pan", width=100,
+            fg_color=CORES["bg_input"], hover_color=CORES["accent_hover"],
+            command=lambda: self.set_effects_preset("pan")
+        ).pack(side="left", padx=5)
+        
+        ctk.CTkButton(
+            buttons_frame, text="Apenas Zoom", width=100,
+            fg_color=CORES["bg_input"], hover_color=CORES["accent_hover"],
+            command=lambda: self.set_effects_preset("zoom")
+        ).pack(side="left", padx=5)
+        
+        # Botão fechar
+        ctk.CTkButton(
+            selector_window, text="Confirmar", width=150,
+            fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
+            command=selector_window.destroy
+        ).pack(pady=15)
+    
+    def update_effects_count(self):
+        """Atualiza o contador de efeitos selecionados."""
+        count = sum(v.get() for v in self.effect_vars.values())
+        self.effects_count_label.configure(text=f"({count}/14)")
+        
+        # Garantir mínimo de 2 efeitos
+        if count < 2:
+            self.effects_count_label.configure(text_color=CORES["error"] if hasattr(CORES, "error") else "#FF4444")
+        else:
+            self.effects_count_label.configure(text_color=CORES["text_dim"])
+    
+    def set_all_effects(self, value: bool):
+        """Define todos os efeitos como habilitados ou desabilitados."""
+        for var in self.effect_vars.values():
+            var.set(value)
+        self.update_effects_count()
+    
+    def set_effects_preset(self, preset: str):
+        """Aplica um preset de efeitos."""
+        # Primeiro desmarcar todos
+        for var in self.effect_vars.values():
+            var.set(False)
+        
+        if preset == "pan":
+            # Apenas efeitos de pan (A, B, C, D)
+            for letter in ["A", "B", "C", "D"]:
+                self.effect_vars[letter].set(True)
+        elif preset == "zoom":
+            # Efeitos com zoom (E-L)
+            for letter in ["E", "F", "G", "H", "I", "J", "K", "L"]:
+                self.effect_vars[letter].set(True)
+        
+        self.update_effects_count()
+    
+    def get_enabled_effects(self) -> list:
+        """Retorna lista de letras dos efeitos habilitados."""
+        enabled = [letter for letter, var in self.effect_vars.items() if var.get()]
+        # Garantir mínimo de 2 efeitos (pegar os 2 primeiros se necessário)
+        if len(enabled) < 2:
+            all_letters = list(self.EFFECT_NAMES.keys())
+            while len(enabled) < 2:
+                for letter in all_letters:
+                    if letter not in enabled:
+                        enabled.append(letter)
+                        break
+        return enabled
 
     def toggle_srt_source(self):
         """Alterna campos de fonte de imagem SRT."""
@@ -7034,6 +7216,7 @@ v2.0 (Versão Base)
             "whisk_parallel_workers": self.whisk_workers_var.get(),  # Workers paralelos (0 = auto)
             "selected_prompt_id": self.get_selected_prompt_id(),  # Prompt de imagem selecionado
             "use_varied_animations": self.use_varied_animations_var.get(),
+            "enabled_effects": self.get_enabled_effects(),  # Efeitos de animação selecionados
             "pan_amount": self.pan_amount_var.get(),
             # Pipeline SRT v3.1
             "subtitle_mode": self.subtitle_mode_var.get(),

@@ -3197,14 +3197,15 @@ class VSLEngine:
 
     def insert_vsl(self, video_path, vsl_path, start_time_sec, output_path, use_gpu=False):
         """
-        Insere VSL no vídeo na camada superior no momento especificado.
+        Insere VSL no vídeo com áudio da VSL substituindo a narração durante o trecho.
         
-        MÉTODO: Corta o vídeo em 3 partes, substitui a parte do meio pelo VSL,
-        e concatena tudo. Isso garante que o VSL apareça corretamente.
+        MÉTODO: Usa filter_complex do FFmpeg para:
+        1. Sobrepor o vídeo da VSL no momento correto
+        2. Substituir o áudio da narração pelo áudio da VSL durante o trecho
         
         Args:
-            video_path: Caminho do vídeo base
-            vsl_path: Caminho do arquivo VSL
+            video_path: Caminho do vídeo base (com narração)
+            vsl_path: Caminho do arquivo VSL (com seu próprio áudio)
             start_time_sec: Timestamp de início em segundos
             output_path: Caminho de saída
             use_gpu: Se deve usar GPU para encoding
@@ -3231,7 +3232,6 @@ class VSLEngine:
             vsl_end_time = start_time_sec + vsl_duration
             if vsl_end_time > base_duration:
                 self.log(f"VSL não cabe no vídeo (início: {start_time_sec}s, duração VSL: {vsl_duration}s, duração vídeo: {base_duration}s)", "WARN")
-                # Ajustar para terminar no fim do vídeo
                 vsl_duration = base_duration - start_time_sec
                 vsl_end_time = base_duration
                 if vsl_duration <= 0:
@@ -3255,157 +3255,82 @@ class VSLEngine:
             else:
                 encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
 
-            # Criar diretório temporário para os arquivos intermediários
+            # Criar diretório temporário
             temp_dir = tempfile.mkdtemp(prefix="vsl_insert_")
             
             try:
-                # PARTE 1: Extrair início do vídeo (0 até start_time_sec)
-                part1_path = os.path.join(temp_dir, "part1.mp4")
-                if start_time_sec > 0:
-                    cmd_part1 = [
-                        "ffmpeg", "-y",
-                        "-i", video_path,
-                        "-t", str(start_time_sec),
-                        "-c", "copy",
-                        part1_path
-                    ]
-                    result = subprocess.run(cmd_part1, capture_output=True, text=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-                    if result.returncode != 0:
-                        self.log(f"Erro ao extrair parte 1: {result.stderr[-200:] if result.stderr else ''}", "ERROR")
-                        return None
-                    self.log("Parte 1 extraída (antes da VSL)", "DEBUG")
+                # ============================================================
+                # MÉTODO: Overlay de vídeo + substituição de áudio
+                # ============================================================
                 
-                # PARTE 2: Preparar o VSL (redimensionar para resolução do vídeo base)
-                # IMPORTANTE: Manter o áudio original da VSL!
-                vsl_prepared_path = os.path.join(temp_dir, "vsl_prepared.mp4")
-                cmd_vsl = [
+                # Filtro de vídeo:
+                # 1. Redimensiona a VSL para o tamanho do vídeo base
+                # 2. Atrasa a VSL para começar em start_time_sec (usando setpts)
+                # 3. Faz overlay da VSL sobre o vídeo base apenas no intervalo correto
+                
+                # Filtro de áudio:
+                # 1. Pega o áudio do vídeo base
+                # 2. Pega o áudio da VSL
+                # 3. Silencia o áudio base durante o trecho da VSL
+                # 4. Adiciona o áudio da VSL no momento correto
+                # 5. Mixa os dois
+                
+                filter_complex = (
+                    # Vídeo: Preparar VSL (redimensionar e ajustar timing)
+                    f"[1:v]scale={base_width}:{base_height}:force_original_aspect_ratio=decrease,"
+                    f"pad={base_width}:{base_height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    f"setpts=PTS+{start_time_sec}/TB[vsl];"
+                    
+                    # Vídeo: Overlay da VSL sobre o vídeo base
+                    f"[0:v][vsl]overlay=0:0:enable='between(t,{start_time_sec},{vsl_end_time})':eof_action=pass[outv];"
+                    
+                    # Áudio: Silenciar o áudio base durante a VSL
+                    f"[0:a]volume=enable='between(t,{start_time_sec},{vsl_end_time})':volume=0[base_audio_ducked];"
+                    
+                    # Áudio: Atrasar o áudio da VSL para começar no momento certo
+                    f"[1:a]adelay={int(start_time_sec * 1000)}|{int(start_time_sec * 1000)}[vsl_audio_delayed];"
+                    
+                    # Áudio: Mixar os dois áudios
+                    f"[base_audio_ducked][vsl_audio_delayed]amix=inputs=2:duration=first:dropout_transition=0[outa]"
+                )
+                
+                self.log(f"Aplicando VSL: vídeo {start_time_sec:.1f}s-{vsl_end_time:.1f}s com áudio da VSL", "DEBUG")
+                
+                cmd = [
                     "ffmpeg", "-y",
+                    "-i", video_path,
                     "-i", vsl_path,
-                    "-vf", f"scale={base_width}:{base_height}:force_original_aspect_ratio=decrease,pad={base_width}:{base_height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=24",
-                    "-t", str(vsl_duration),  # Limitar duração se necessário
+                    "-filter_complex", filter_complex,
+                    "-map", "[outv]",
+                    "-map", "[outa]",
                     *encoder_args,
-                    "-c:a", "aac", "-b:a", "192k",  # MANTER áudio da VSL
+                    "-c:a", "aac", "-b:a", "192k",
                     "-pix_fmt", "yuv420p",
-                    vsl_prepared_path
-                ]
-                result = subprocess.run(cmd_vsl, capture_output=True, text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-                if result.returncode != 0:
-                    self.log(f"Erro ao preparar VSL: {result.stderr[-200:] if result.stderr else ''}", "ERROR")
-                    return None
-                self.log("VSL preparada (redimensionada, com áudio próprio)", "DEBUG")
-                
-                # PARTE 3: Extrair fim do vídeo (após vsl_end_time até o final)
-                part3_path = os.path.join(temp_dir, "part3.mp4")
-                if vsl_end_time < base_duration:
-                    cmd_part3 = [
-                        "ffmpeg", "-y",
-                        "-ss", str(vsl_end_time),
-                        "-i", video_path,
-                        "-c", "copy",
-                        part3_path
-                    ]
-                    result = subprocess.run(cmd_part3, capture_output=True, text=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-                    if result.returncode != 0:
-                        self.log(f"Erro ao extrair parte 3: {result.stderr[-200:] if result.stderr else ''}", "ERROR")
-                        return None
-                    self.log("Parte 3 extraída (após VSL)", "DEBUG")
-                
-                # A VSL já tem seu próprio áudio, usar diretamente
-                vsl_with_audio_path = vsl_prepared_path
-                self.log("VSL com áudio próprio pronta", "DEBUG")
-                
-                # CONCATENAR: Criar arquivo de lista para concat
-                concat_list_path = os.path.join(temp_dir, "concat_list.txt")
-                with open(concat_list_path, "w") as f:
-                    if start_time_sec > 0 and os.path.exists(part1_path):
-                        f.write(f"file '{part1_path}'\n")
-                    f.write(f"file '{vsl_with_audio_path}'\n")
-                    if vsl_end_time < base_duration and os.path.exists(part3_path):
-                        f.write(f"file '{part3_path}'\n")
-                
-                # Concatenar usando filter_complex para garantir compatibilidade
-                # Primeiro, re-encodar todas as partes para garantir compatibilidade
-                parts_to_concat = []
-                
-                if start_time_sec > 0 and os.path.exists(part1_path):
-                    part1_reenc = os.path.join(temp_dir, "part1_reenc.mp4")
-                    cmd_reenc1 = [
-                        "ffmpeg", "-y", "-i", part1_path,
-                        "-vf", f"scale={base_width}:{base_height},fps=24",
-                        *encoder_args, "-c:a", "aac", "-b:a", "192k",
-                        "-pix_fmt", "yuv420p", part1_reenc
-                    ]
-                    subprocess.run(cmd_reenc1, capture_output=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-                    if os.path.exists(part1_reenc):
-                        parts_to_concat.append(part1_reenc)
-                    else:
-                        parts_to_concat.append(part1_path)
-                
-                parts_to_concat.append(vsl_with_audio_path)
-                
-                if vsl_end_time < base_duration and os.path.exists(part3_path):
-                    part3_reenc = os.path.join(temp_dir, "part3_reenc.mp4")
-                    cmd_reenc3 = [
-                        "ffmpeg", "-y", "-i", part3_path,
-                        "-vf", f"scale={base_width}:{base_height},fps=24",
-                        *encoder_args, "-c:a", "aac", "-b:a", "192k",
-                        "-pix_fmt", "yuv420p", part3_reenc
-                    ]
-                    subprocess.run(cmd_reenc3, capture_output=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-                    if os.path.exists(part3_reenc):
-                        parts_to_concat.append(part3_reenc)
-                    else:
-                        parts_to_concat.append(part3_path)
-                
-                # Criar lista de concat atualizada
-                with open(concat_list_path, "w") as f:
-                    for part in parts_to_concat:
-                        # Escapar aspas simples no caminho
-                        safe_path = part.replace("'", "'\\''")
-                        f.write(f"file '{safe_path}'\n")
-                
-                # Concatenar
-                cmd_concat = [
-                    "ffmpeg", "-y",
-                    "-f", "concat",
-                    "-safe", "0",
-                    "-i", concat_list_path,
-                    "-c", "copy",
+                    "-shortest",
                     output_path
                 ]
-                result = subprocess.run(cmd_concat, capture_output=True, text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                )
                 
                 if result.returncode != 0:
-                    self.log(f"Erro ao concatenar: {result.stderr[-300:] if result.stderr else ''}", "ERROR")
-                    # Tentar método alternativo com re-encoding
-                    self.log("Tentando método alternativo com re-encoding...", "WARN")
-                    cmd_concat_alt = [
-                        "ffmpeg", "-y",
-                        "-f", "concat",
-                        "-safe", "0",
-                        "-i", concat_list_path,
-                        *encoder_args,
-                        "-c:a", "aac", "-b:a", "192k",
-                        "-pix_fmt", "yuv420p",
-                        output_path
-                    ]
-                    result = subprocess.run(cmd_concat_alt, capture_output=True, text=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-                    if result.returncode != 0:
-                        self.log(f"Erro no método alternativo: {result.stderr[-300:] if result.stderr else ''}", "ERROR")
-                        return None
-
-                self.log("VSL inserido com sucesso!", "OK")
+                    self.log(f"Erro no método principal: {result.stderr[-500:] if result.stderr else ''}", "ERROR")
+                    
+                    # Método alternativo: cortar e concatenar
+                    self.log("Tentando método alternativo (cortar e concatenar)...", "WARN")
+                    return self._insert_vsl_concat_method(
+                        video_path, vsl_path, start_time_sec, vsl_duration, vsl_end_time,
+                        base_width, base_height, base_duration, encoder_args, output_path, temp_dir
+                    )
+                
+                self.log("VSL inserido com sucesso (com áudio)!", "OK")
                 return output_path
                 
             finally:
-                # Limpar arquivos temporários
                 try:
                     import shutil
                     shutil.rmtree(temp_dir, ignore_errors=True)
@@ -3416,6 +3341,103 @@ class VSLEngine:
             self.log(f"Erro ao inserir VSL: {str(e)}", "ERROR")
             import traceback
             self.log(traceback.format_exc(), "ERROR")
+            return None
+    
+    def _insert_vsl_concat_method(self, video_path, vsl_path, start_time_sec, vsl_duration, 
+                                   vsl_end_time, base_width, base_height, base_duration,
+                                   encoder_args, output_path, temp_dir):
+        """Método alternativo: corta em 3 partes e concatena."""
+        try:
+            # PARTE 1: Extrair início do vídeo (0 até start_time_sec)
+            part1_path = os.path.join(temp_dir, "part1.mp4")
+            if start_time_sec > 0:
+                cmd_part1 = [
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-t", str(start_time_sec),
+                    "-vf", f"scale={base_width}:{base_height},fps=24",
+                    *encoder_args, "-c:a", "aac", "-b:a", "192k",
+                    "-pix_fmt", "yuv420p", part1_path
+                ]
+                result = subprocess.run(cmd_part1, capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                if result.returncode != 0:
+                    self.log(f"Erro ao extrair parte 1: {result.stderr[-200:] if result.stderr else ''}", "ERROR")
+                    return None
+                self.log("Parte 1 extraída", "DEBUG")
+            
+            # PARTE 2: VSL com seu próprio áudio
+            vsl_prepared_path = os.path.join(temp_dir, "vsl_prepared.mp4")
+            cmd_vsl = [
+                "ffmpeg", "-y", "-i", vsl_path,
+                "-t", str(vsl_duration),
+                "-vf", f"scale={base_width}:{base_height}:force_original_aspect_ratio=decrease,pad={base_width}:{base_height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=24",
+                *encoder_args, "-c:a", "aac", "-b:a", "192k",
+                "-pix_fmt", "yuv420p", vsl_prepared_path
+            ]
+            result = subprocess.run(cmd_vsl, capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+            if result.returncode != 0:
+                self.log(f"Erro ao preparar VSL: {result.stderr[-200:] if result.stderr else ''}", "ERROR")
+                return None
+            self.log("VSL preparada com áudio", "DEBUG")
+            
+            # PARTE 3: Extrair fim do vídeo
+            part3_path = os.path.join(temp_dir, "part3.mp4")
+            if vsl_end_time < base_duration:
+                cmd_part3 = [
+                    "ffmpeg", "-y", "-ss", str(vsl_end_time), "-i", video_path,
+                    "-vf", f"scale={base_width}:{base_height},fps=24",
+                    *encoder_args, "-c:a", "aac", "-b:a", "192k",
+                    "-pix_fmt", "yuv420p", part3_path
+                ]
+                result = subprocess.run(cmd_part3, capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                if result.returncode != 0:
+                    self.log(f"Erro ao extrair parte 3: {result.stderr[-200:] if result.stderr else ''}", "ERROR")
+                    return None
+                self.log("Parte 3 extraída", "DEBUG")
+            
+            # Criar lista de concatenação
+            concat_list_path = os.path.join(temp_dir, "concat_list.txt")
+            with open(concat_list_path, "w", encoding="utf-8") as f:
+                if start_time_sec > 0 and os.path.exists(part1_path):
+                    f.write(f"file '{part1_path.replace(chr(92), '/')}'\n")
+                f.write(f"file '{vsl_prepared_path.replace(chr(92), '/')}'\n")
+                if vsl_end_time < base_duration and os.path.exists(part3_path):
+                    f.write(f"file '{part3_path.replace(chr(92), '/')}'\n")
+            
+            # Concatenar
+            cmd_concat = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_list_path,
+                "-c", "copy",
+                output_path
+            ]
+            result = subprocess.run(cmd_concat, capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+            
+            if result.returncode != 0:
+                # Tentar com re-encoding
+                cmd_concat_reenc = [
+                    "ffmpeg", "-y",
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_list_path,
+                    *encoder_args, "-c:a", "aac", "-b:a", "192k",
+                    "-pix_fmt", "yuv420p",
+                    output_path
+                ]
+                result = subprocess.run(cmd_concat_reenc, capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                if result.returncode != 0:
+                    self.log(f"Erro ao concatenar: {result.stderr[-300:] if result.stderr else ''}", "ERROR")
+                    return None
+            
+            self.log("VSL inserido com sucesso (método concat)!", "OK")
+            return output_path
+            
+        except Exception as e:
+            self.log(f"Erro no método concat: {str(e)}", "ERROR")
             return None
 
 

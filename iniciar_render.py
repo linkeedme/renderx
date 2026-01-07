@@ -49,6 +49,7 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tkinter import font as tkfont, colorchooser
 from dataclasses import dataclass
+from typing import Optional, List, Tuple, Dict, Any
 
 # Verificar se httpx está disponível (necessário para TTS)
 try:
@@ -278,7 +279,16 @@ DEFAULT_CONFIG = {
     # Backlog de Áudios
     "audio_backlog_folder": "",          # Pasta de áudios backlog
     "use_audio_backlog": False,          # Usar backlog de áudios
-    "audio_backlog_history_file": "audio_backlog_history.json"
+    "audio_backlog_history_file": "audio_backlog_history.json",
+    # Modo 1 Imagem (Pêndulo)
+    "video_mode": "traditional",         # "traditional", "srt", "single_image"
+    "pendulum_amplitude": 1.6,           # Amplitude da oscilação em graus
+    "pendulum_crop_ratio": 1.0,          # Ratio de crop (0.5-1.0)
+    "pendulum_zoom": 2.0,                # Zoom da imagem (1.0-3.0)
+    "pendulum_cell_duration": 10.0,      # Duração da célula base em segundos
+    "chroma_color": "00b140",            # Cor do chroma key (hex sem #)
+    "chroma_similarity": 0.2,            # Similaridade do chroma key (0.01-0.5)
+    "chroma_blend": 0.1                  # Blend do chroma key (0.0-0.5)
 }
 
 RESOLUTIONS = {
@@ -1387,6 +1397,415 @@ class FinalSlideshowEngine:
         return True
 
     # =========================================================================
+    # MODO 1 IMAGEM - PÊNDULO COM LOOP SEAMLESS
+    # =========================================================================
+    def generate_pendulum_cell(self, image_path: str, config: dict, temp_dir: str) -> Optional[str]:
+        """
+        Gera célula base com efeito pêndulo usando OpenCV.
+        
+        O efeito pêndulo cria uma oscilação suave da imagem que faz um ciclo
+        completo (ida e volta) durante a duração da célula, permitindo loop
+        seamless sem cortes visíveis.
+        
+        Args:
+            image_path: Caminho da imagem
+            config: Configuração do vídeo
+            temp_dir: Diretório temporário
+            
+        Returns:
+            Caminho do vídeo da célula ou None em caso de erro
+        """
+        try:
+            self.log("Gerando célula pêndulo...", "INFO")
+            
+            # Carregar imagem
+            img = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                self.log(f"Erro ao carregar imagem: {image_path}", "ERROR")
+                return None
+            
+            has_alpha = img.shape[2] == 4 if len(img.shape) > 2 else False
+            
+            # Parâmetros do pêndulo
+            amplitude_graus = config.get("pendulum_amplitude", 1.6)
+            crop_ratio = config.get("pendulum_crop_ratio", 1.0)
+            zoom = config.get("pendulum_zoom", 2.0)
+            cell_duration = config.get("pendulum_cell_duration", 10.0)
+            
+            # Parâmetros de vídeo
+            width, height = RESOLUTIONS[config.get("resolution", "720p")]
+            fps = config.get("fps", 24)
+            total_frames = int(cell_duration * fps)
+            
+            original_w = img.shape[1]
+            original_h = img.shape[0]
+            
+            self.log(f"Pêndulo: amplitude={amplitude_graus}°, zoom={zoom}x, duração={cell_duration}s", "INFO")
+            
+            # Aplicar crop se necessário
+            if crop_ratio < 1.0:
+                crop_w = int(original_w * crop_ratio)
+                crop_h = int(original_h * crop_ratio)
+                crop_x = (original_w - crop_w) // 2
+                crop_y = (original_h - crop_h) // 2
+                img_processed = img[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
+            else:
+                img_processed = img.copy()
+                crop_w = original_w
+                crop_h = original_h
+            
+            # Aplicar zoom
+            zoom_w = int(crop_w * zoom)
+            zoom_h = int(crop_h * zoom)
+            img_zoomed = cv2.resize(img_processed, (zoom_w, zoom_h), interpolation=cv2.INTER_LANCZOS4)
+            
+            # Calcular escala necessária para cobrir rotação
+            max_angle_rad = abs(amplitude_graus) * math.pi / 180.0
+            rotation_factor = 1.0 / math.cos(max_angle_rad) if max_angle_rad > 0 else 1.0
+            
+            canvas_diagonal = math.sqrt(width**2 + height**2)
+            img_diagonal = math.sqrt(zoom_w**2 + zoom_h**2)
+            scale_needed = (canvas_diagonal * rotation_factor) / img_diagonal if img_diagonal > 0 else 1.0
+            
+            final_w = int(zoom_w * scale_needed)
+            final_h = int(zoom_h * scale_needed)
+            
+            # Garantir tamanho mínimo
+            if final_w < width:
+                final_w = int(width * 1.1)
+            if final_h < height:
+                final_h = int(height * 1.1)
+            
+            img_resized = cv2.resize(img_zoomed, (final_w, final_h), interpolation=cv2.INTER_LANCZOS4)
+            
+            # Criar vídeo
+            temp_video_path = os.path.join(temp_dir, "pendulum_cell.mp4")
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(temp_video_path, fourcc, fps, (width, height))
+            
+            if not out.isOpened():
+                self.log("Erro ao criar video writer!", "ERROR")
+                return None
+            
+            center_img_x = final_w // 2
+            center_img_y = final_h // 2
+            center_canvas_x = width // 2
+            center_canvas_y = height // 2
+            
+            half_cycle = cell_duration / 2.0
+            
+            for frame_num in range(total_frames):
+                if self.cancelled:
+                    out.release()
+                    return None
+                
+                t = (frame_num / fps) % cell_duration
+                
+                # Movimento de pêndulo: -amplitude -> +amplitude -> -amplitude
+                if t <= half_cycle:
+                    progress = t / half_cycle
+                    angle_degrees = -amplitude_graus + (2 * amplitude_graus * progress)
+                else:
+                    progress = (t - half_cycle) / half_cycle
+                    angle_degrees = amplitude_graus - (2 * amplitude_graus * progress)
+                
+                # Rotacionar imagem
+                rotation_matrix = cv2.getRotationMatrix2D((center_img_x, center_img_y), angle_degrees, 1.0)
+                
+                if has_alpha:
+                    img_rotated = cv2.warpAffine(img_resized, rotation_matrix, (final_w, final_h),
+                                                 flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                                                 borderValue=(0, 0, 0, 0))
+                else:
+                    img_rotated = cv2.warpAffine(img_resized, rotation_matrix, (final_w, final_h),
+                                                 flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                                                 borderValue=(0, 0, 0))
+                
+                # Criar frame de saída
+                frame = np.zeros((height, width, 3), dtype=np.uint8)
+                
+                # Posicionar imagem no centro do canvas
+                x = center_canvas_x - final_w // 2
+                y = center_canvas_y - final_h // 2
+                
+                x1 = max(0, x)
+                y1 = max(0, y)
+                x2 = min(width, x + final_w)
+                y2 = min(height, y + final_h)
+                
+                img_x1 = max(0, -x)
+                img_y1 = max(0, -y)
+                img_x2 = img_x1 + (x2 - x1)
+                img_y2 = img_y1 + (y2 - y1)
+                
+                if x2 > x1 and y2 > y1:
+                    if has_alpha:
+                        img_alpha = img_rotated[img_y1:img_y2, img_x1:img_x2, 3:4] / 255.0
+                        frame[y1:y2, x1:x2] = (
+                            frame[y1:y2, x1:x2] * (1 - img_alpha) +
+                            img_rotated[img_y1:img_y2, img_x1:img_x2, :3] * img_alpha
+                        ).astype(np.uint8)
+                    else:
+                        frame[y1:y2, x1:x2] = img_rotated[img_y1:img_y2, img_x1:img_x2]
+                
+                out.write(frame)
+                
+                # Atualizar progresso
+                if frame_num % (fps * 2) == 0:  # A cada 2 segundos
+                    progress_pct = (frame_num / total_frames) * 100
+                    self.update_progress("pendulum", frame_num, total_frames, f"{progress_pct:.0f}%")
+            
+            out.release()
+            
+            self.log(f"Célula pêndulo gerada: {cell_duration}s", "OK")
+            return temp_video_path
+            
+        except Exception as e:
+            self.log(f"Erro ao gerar célula pêndulo: {str(e)}", "ERROR")
+            return None
+
+    def apply_overlay_to_cell(self, pendulum_video: str, config: dict, temp_dir: str) -> Optional[str]:
+        """
+        Aplica overlay com chroma key na célula base do pêndulo.
+        
+        Args:
+            pendulum_video: Caminho do vídeo da célula pêndulo
+            config: Configuração do vídeo
+            temp_dir: Diretório temporário
+            
+        Returns:
+            Caminho do vídeo com overlay ou o vídeo original se não houver overlay
+        """
+        try:
+            overlay_path = config.get("overlay_path", "")
+            
+            if not overlay_path or not os.path.exists(overlay_path):
+                self.log("Sem overlay configurado, usando célula pêndulo pura", "INFO")
+                return pendulum_video
+            
+            self.log("Aplicando overlay com chroma key...", "INFO")
+            
+            # Parâmetros do chroma key
+            chroma_color = config.get("chroma_color", "00b140")
+            similarity = config.get("chroma_similarity", 0.2)
+            blend = config.get("chroma_blend", 0.1)
+            
+            width, height = RESOLUTIONS[config.get("resolution", "720p")]
+            cell_duration = config.get("pendulum_cell_duration", 10.0)
+            
+            output_path = os.path.join(temp_dir, "cell_with_overlay.mp4")
+            
+            # Construir comando FFmpeg
+            use_gpu = self.check_gpu_available()
+            
+            cmd = ["ffmpeg", "-y"]
+            
+            if use_gpu:
+                cmd.extend(["-hwaccel", "auto"])
+            
+            # Inputs
+            cmd.extend(["-i", pendulum_video])
+            cmd.extend(["-stream_loop", "-1", "-i", overlay_path])
+            
+            # Filtros
+            filters = []
+            filters.append(f"[0:v]scale={width}:{height},setpts=PTS-STARTPTS[base]")
+            filters.append(f"[1:v]scale={width}:{height}[overlay_sc]")
+            filters.append(f"[overlay_sc]chromakey=color=0x{chroma_color}:similarity={similarity}:blend={blend}[overlay_key]")
+            filters.append("[base][overlay_key]overlay=(W-w)/2:(H-h)/2[vout]")
+            
+            cmd.extend(["-filter_complex", ";".join(filters)])
+            cmd.extend(["-map", "[vout]"])
+            
+            # Encoder
+            if use_gpu:
+                cmd.extend([
+                    "-c:v", "h264_nvenc",
+                    "-preset", "p4",
+                    "-b:v", "8M"
+                ])
+            else:
+                cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
+            
+            cmd.extend([
+                "-t", str(cell_duration),
+                "-pix_fmt", "yuv420p",
+                "-an",
+                output_path
+            ])
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+            
+            if result.returncode != 0:
+                self.log(f"Erro ao aplicar overlay: {result.stderr[-300:] if result.stderr else ''}", "ERROR")
+                return pendulum_video  # Fallback: retornar vídeo sem overlay
+            
+            self.log("Overlay aplicado com sucesso!", "OK")
+            return output_path
+            
+        except Exception as e:
+            self.log(f"Erro ao aplicar overlay: {str(e)}", "ERROR")
+            return pendulum_video
+
+    def loop_cell_to_duration(self, cell_video: str, audio_duration: float, config: dict, temp_dir: str) -> Optional[str]:
+        """
+        Faz loop da célula base até cobrir a duração do áudio.
+        
+        Args:
+            cell_video: Caminho do vídeo da célula
+            audio_duration: Duração do áudio em segundos
+            config: Configuração do vídeo
+            temp_dir: Diretório temporário
+            
+        Returns:
+            Caminho do vídeo loopado ou None em caso de erro
+        """
+        try:
+            cell_duration = self.get_video_duration(cell_video)
+            if cell_duration is None or cell_duration <= 0:
+                self.log("Erro ao obter duração da célula!", "ERROR")
+                return None
+            
+            loops_needed = math.ceil(audio_duration / cell_duration)
+            self.log(f"Loop: {loops_needed}x célula de {cell_duration:.1f}s para cobrir {audio_duration:.1f}s", "INFO")
+            
+            if loops_needed <= 1:
+                # Não precisa fazer loop, apenas cortar no tamanho do áudio
+                return cell_video
+            
+            # Criar lista de concat para loop
+            loop_list = os.path.join(temp_dir, "loop_list.txt")
+            with open(loop_list, "w", encoding="utf-8") as f:
+                for _ in range(loops_needed):
+                    safe_path = cell_video.replace("\\", "/").replace("'", "'\\''")
+                    f.write(f"file '{safe_path}'\n")
+            
+            looped_video = os.path.join(temp_dir, "looped_video.mp4")
+            
+            # FFmpeg concat com corte no tamanho do áudio
+            use_gpu = self.check_gpu_available()
+            if use_gpu:
+                encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
+            else:
+                encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", loop_list,
+                *encoder_args,
+                "-pix_fmt", "yuv420p",
+                "-t", str(audio_duration),
+                looped_video
+            ]
+            
+            self.log(f"Fazendo loop do vídeo ({loops_needed}x)...", "INFO")
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+            
+            if result.returncode != 0:
+                self.log(f"Erro no loop: {result.stderr[-300:] if result.stderr else ''}", "ERROR")
+                return None
+            
+            self.log("Loop concluído!", "OK")
+            return looped_video
+            
+        except Exception as e:
+            self.log(f"Erro ao fazer loop: {str(e)}", "ERROR")
+            return None
+
+    def render_single_image_loop(self, config: dict, temp_dir: str) -> Optional[str]:
+        """
+        Pipeline completo do Modo 1 Imagem com loop seamless.
+        
+        1. Seleciona 1 imagem aleatória do banco de imagens
+        2. Gera célula base com efeito pêndulo
+        3. Aplica overlay com chroma key
+        4. Faz loop até cobrir a duração do áudio
+        
+        Args:
+            config: Configuração do vídeo
+            temp_dir: Diretório temporário
+            
+        Returns:
+            Caminho do vídeo final ou None em caso de erro
+        """
+        try:
+            self.log("+================================================+", "INFO")
+            self.log("|  MODO 1 IMAGEM - PÊNDULO COM LOOP SEAMLESS    |", "ENGINE")
+            self.log("+================================================+", "INFO")
+            
+            # Obter duração do áudio
+            audio_path = config.get("audio_path", "")
+            audio_duration = self.get_audio_duration(audio_path)
+            if audio_duration is None:
+                self.log("Erro ao obter duração do áudio!", "ERROR")
+                return None
+            
+            self.log(f"Duração do áudio: {audio_duration:.1f}s", "INFO")
+            
+            # ETAPA 1: Selecionar imagem aleatória do banco
+            self.log("--- ETAPA 1: Selecionando imagem aleatória ---", "INFO")
+            
+            images_folder = config.get("batch_images_folder", "")
+            if not images_folder:
+                images_folder = config.get("images_backlog_folder", "")
+            
+            if not images_folder or not os.path.exists(images_folder):
+                self.log(f"Pasta de imagens não encontrada: {images_folder}", "ERROR")
+                return None
+            
+            image_files = self.get_image_files(images_folder)
+            if not image_files:
+                self.log("Nenhuma imagem encontrada no banco!", "ERROR")
+                return None
+            
+            import random
+            selected_image = random.choice(image_files)
+            self.log(f"Imagem selecionada: {os.path.basename(selected_image)}", "OK")
+            
+            # ETAPA 2: Gerar célula pêndulo
+            self.log("--- ETAPA 2: Gerando célula pêndulo ---", "INFO")
+            
+            pendulum_cell = self.generate_pendulum_cell(selected_image, config, temp_dir)
+            if pendulum_cell is None:
+                self.log("Falha ao gerar célula pêndulo!", "ERROR")
+                return None
+            
+            # ETAPA 3: Aplicar overlay
+            self.log("--- ETAPA 3: Aplicando overlay ---", "INFO")
+            
+            cell_with_overlay = self.apply_overlay_to_cell(pendulum_cell, config, temp_dir)
+            if cell_with_overlay is None:
+                self.log("Falha ao aplicar overlay!", "ERROR")
+                return None
+            
+            # ETAPA 4: Fazer loop até cobrir duração do áudio
+            self.log("--- ETAPA 4: Loop seamless ---", "INFO")
+            
+            looped_video = self.loop_cell_to_duration(cell_with_overlay, audio_duration, config, temp_dir)
+            if looped_video is None:
+                self.log("Falha ao fazer loop!", "ERROR")
+                return None
+            
+            self.log("Modo 1 Imagem concluído com sucesso!", "OK")
+            return looped_video
+            
+        except Exception as e:
+            self.log(f"Erro no pipeline Modo 1 Imagem: {str(e)}", "ERROR")
+            return None
+
+    # =========================================================================
     # MODO LOOP - IMAGENS FIXAS
     # =========================================================================
     def render_with_loop(self, images, config, temp_dir, fixed_count, audio_duration):
@@ -2043,10 +2462,12 @@ class FinalSlideshowEngine:
             seconds = int(audio_duration % 60)
             self.log(f"Audio: {minutes}m {seconds}s ({audio_duration:.1f}s)", "INFO")
 
-            # Verificar se deve usar lógica baseada em SRT
-            use_srt_based = config.get("use_srt_based_images", False)
+            # Verificar modo de vídeo
+            video_mode = config.get("video_mode", "traditional")
+            use_srt_based = config.get("use_srt_based_images", False) or video_mode == "srt"
+            use_single_image = video_mode == "single_image"
             
-            # ETAPA 0: Backlog Videos (se ativo) - Funciona em ambos os modos
+            # ETAPA 0: Backlog Videos (se ativo) - Funciona em todos os modos (exceto single_image)
             backlog_intro = None
             if config.get("use_backlog_videos", False):
                 self.log("+================================================+", "INFO")
@@ -2080,8 +2501,18 @@ class FinalSlideshowEngine:
                 else:
                     self.log(f"Intro do backlog criada: {backlog_intro}", "OK")
             
-            if use_srt_based:
-                # NOVA LÓGICA: Processar SRT e gerar/selecionar imagens
+            if use_single_image:
+                # MODO 1 IMAGEM: Pêndulo com loop seamless
+                video_stitched = self.render_single_image_loop(config, temp_dir)
+                if video_stitched is None:
+                    self.log("Falha no Modo 1 Imagem!", "ERROR")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    return None
+
+                current_video = video_stitched
+                
+            elif use_srt_based:
+                # MODO SRT: Processar SRT e gerar/selecionar imagens
                 self.log("+================================================+", "INFO")
                 self.log("|  MODO: IMAGENS BASEADAS EM SRT                |", "ENGINE")
                 self.log("+================================================+", "INFO")
@@ -4013,8 +4444,13 @@ class FinalSlideshowApp(ctk.CTk):
         self.backlog_folder_var = ctk.StringVar(value=backlog_folder_default)
         self.backlog_status_var = ctk.StringVar(value="Verificando...")
         
-        # Geração de Imagens via SRT
-        self.use_srt_based_images_var = ctk.BooleanVar(value=self.config.get("use_srt_based_images", False))
+        # Modo de Vídeo: "traditional", "srt", "single_image"
+        # Converter valor antigo (bool) para novo formato (string)
+        old_srt_value = self.config.get("use_srt_based_images", False)
+        video_mode_default = self.config.get("video_mode", "traditional")
+        if video_mode_default == "traditional" and old_srt_value:
+            video_mode_default = "srt"
+        self.video_mode_var = ctk.StringVar(value=video_mode_default)
         self.image_source_var = ctk.StringVar(value=self.config.get("image_source", "generate"))
         self.images_backlog_folder_var = ctk.StringVar(value=self.config.get("images_backlog_folder", ""))
         # Tokens Whisk agora são carregados do arquivo whisk_keys.json
@@ -4058,6 +4494,16 @@ class FinalSlideshowApp(ctk.CTk):
         # Backlog de Áudios
         self.audio_backlog_folder_var = ctk.StringVar(value=self.config.get("audio_backlog_folder", ""))
         self.use_audio_backlog_var = ctk.BooleanVar(value=self.config.get("use_audio_backlog", False))
+
+        # Modo 1 Imagem (Pêndulo)
+        self.pendulum_amplitude_var = ctk.DoubleVar(value=self.config.get("pendulum_amplitude", 1.6))
+        self.pendulum_crop_ratio_var = ctk.DoubleVar(value=self.config.get("pendulum_crop_ratio", 1.0))
+        self.pendulum_zoom_var = ctk.DoubleVar(value=self.config.get("pendulum_zoom", 2.0))
+        self.pendulum_cell_duration_var = ctk.DoubleVar(value=self.config.get("pendulum_cell_duration", 10.0))
+        # Chroma Key para overlay
+        self.chroma_color_var = ctk.StringVar(value=self.config.get("chroma_color", "00b140"))
+        self.chroma_similarity_var = ctk.DoubleVar(value=self.config.get("chroma_similarity", 0.2))
+        self.chroma_blend_var = ctk.DoubleVar(value=self.config.get("chroma_blend", 0.1))
 
         # TTS API
         self.tts_provider_var = ctk.StringVar(value=self.config.get("tts_provider", "none"))
@@ -4192,8 +4638,9 @@ class FinalSlideshowApp(ctk.CTk):
             "backlog_audio_volume": self.config.get("backlog_audio_volume", 0.25),
             "backlog_transition_duration": self.config.get("backlog_transition_duration", 0.5),
             "backlog_fade_out_duration": self.config.get("backlog_fade_out_duration", 1.0),
-            # Geração de Imagens via SRT
-            "use_srt_based_images": self.use_srt_based_images_var.get(),
+            # Modo de Vídeo
+            "video_mode": self.video_mode_var.get(),
+            "use_srt_based_images": self.video_mode_var.get() == "srt",  # Compatibilidade
             "image_source": self.image_source_var.get(),
             "images_backlog_folder": self.images_backlog_folder_var.get(),
             "whisk_api_tokens": get_enabled_tokens(),  # Carregado do whisk_keys.json
@@ -4210,7 +4657,15 @@ class FinalSlideshowApp(ctk.CTk):
             "use_random_overlays": self.use_random_overlays_var.get(),
             # Backlog de Áudios
             "audio_backlog_folder": self.audio_backlog_folder_var.get(),
-            "use_audio_backlog": self.use_audio_backlog_var.get()
+            "use_audio_backlog": self.use_audio_backlog_var.get(),
+            # Modo 1 Imagem (Pêndulo)
+            "pendulum_amplitude": self.pendulum_amplitude_var.get(),
+            "pendulum_crop_ratio": self.pendulum_crop_ratio_var.get(),
+            "pendulum_zoom": self.pendulum_zoom_var.get(),
+            "pendulum_cell_duration": self.pendulum_cell_duration_var.get(),
+            "chroma_color": self.chroma_color_var.get(),
+            "chroma_similarity": self.chroma_similarity_var.get(),
+            "chroma_blend": self.chroma_blend_var.get()
         }
         try:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -4606,15 +5061,22 @@ class FinalSlideshowApp(ctk.CTk):
         mode_frame.pack(fill="x", padx=15, pady=5)
 
         ctk.CTkRadioButton(
-            mode_frame, text="Modo Tradicional (imagens do backlog)",
-            variable=self.use_srt_based_images_var, value=False,
+            mode_frame, text="Modo Tradicional (múltiplas imagens do banco)",
+            variable=self.video_mode_var, value="traditional",
             fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
             command=self.toggle_video_mode
         ).pack(anchor="w")
         
         ctk.CTkRadioButton(
             mode_frame, text="Pipeline SRT (imagens seguem narrativa do áudio)",
-            variable=self.use_srt_based_images_var, value=True,
+            variable=self.video_mode_var, value="srt",
+            fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
+            command=self.toggle_video_mode
+        ).pack(anchor="w", pady=(5, 0))
+        
+        ctk.CTkRadioButton(
+            mode_frame, text="Modo 1 Imagem (loop seamless com pêndulo)",
+            variable=self.video_mode_var, value="single_image",
             fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
             command=self.toggle_video_mode
         ).pack(anchor="w", pady=(5, 0))
@@ -4903,17 +5365,157 @@ class FinalSlideshowApp(ctk.CTk):
             text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
         ).pack(anchor="w", padx=10, pady=(5, 10))
 
+        # ===== PAINEL MODO 1 IMAGEM (PÊNDULO) =====
+        self.single_image_mode_frame = ctk.CTkFrame(section, fg_color=CORES["bg_dark"], corner_radius=8)
+        
+        ctk.CTkLabel(
+            self.single_image_mode_frame, text="Opções do Modo 1 Imagem",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=CORES["text_dim"]
+        ).pack(anchor="w", padx=10, pady=(10, 5))
+        
+        # Descrição
+        ctk.CTkLabel(
+            self.single_image_mode_frame,
+            text="Usa 1 imagem aleatória do Banco de Imagens com efeito pêndulo (oscilação suave)",
+            text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
+        ).pack(anchor="w", padx=10, pady=(0, 10))
+        
+        # Sliders de configuração do pêndulo
+        pendulum_frame = ctk.CTkFrame(self.single_image_mode_frame, fg_color="transparent")
+        pendulum_frame.pack(fill="x", padx=10, pady=5)
+        
+        # Amplitude
+        amp_frame = ctk.CTkFrame(pendulum_frame, fg_color="transparent")
+        amp_frame.pack(fill="x", pady=2)
+        ctk.CTkLabel(amp_frame, text="Amplitude:", text_color=CORES["text"], width=100).pack(side="left")
+        self.amp_value_label = ctk.CTkLabel(amp_frame, text=f"{self.pendulum_amplitude_var.get():.1f}°", 
+                                           text_color=CORES["accent"], width=50)
+        self.amp_value_label.pack(side="right", padx=5)
+        ctk.CTkSlider(
+            amp_frame, from_=0.5, to=5.0, number_of_steps=45,
+            variable=self.pendulum_amplitude_var, width=200,
+            progress_color=CORES["accent"], button_color=CORES["accent"],
+            command=lambda v: self.amp_value_label.configure(text=f"{float(v):.1f}°")
+        ).pack(side="right", padx=10)
+        
+        # Zoom
+        zoom_frame = ctk.CTkFrame(pendulum_frame, fg_color="transparent")
+        zoom_frame.pack(fill="x", pady=2)
+        ctk.CTkLabel(zoom_frame, text="Zoom:", text_color=CORES["text"], width=100).pack(side="left")
+        self.pend_zoom_value_label = ctk.CTkLabel(zoom_frame, text=f"{self.pendulum_zoom_var.get():.1f}x", 
+                                                  text_color=CORES["accent"], width=50)
+        self.pend_zoom_value_label.pack(side="right", padx=5)
+        ctk.CTkSlider(
+            zoom_frame, from_=1.0, to=3.0, number_of_steps=20,
+            variable=self.pendulum_zoom_var, width=200,
+            progress_color=CORES["accent"], button_color=CORES["accent"],
+            command=lambda v: self.pend_zoom_value_label.configure(text=f"{float(v):.1f}x")
+        ).pack(side="right", padx=10)
+        
+        # Crop Ratio
+        crop_frame = ctk.CTkFrame(pendulum_frame, fg_color="transparent")
+        crop_frame.pack(fill="x", pady=2)
+        ctk.CTkLabel(crop_frame, text="Crop:", text_color=CORES["text"], width=100).pack(side="left")
+        self.crop_value_label = ctk.CTkLabel(crop_frame, text=f"{self.pendulum_crop_ratio_var.get():.2f}", 
+                                            text_color=CORES["accent"], width=50)
+        self.crop_value_label.pack(side="right", padx=5)
+        ctk.CTkSlider(
+            crop_frame, from_=0.5, to=1.0, number_of_steps=50,
+            variable=self.pendulum_crop_ratio_var, width=200,
+            progress_color=CORES["accent"], button_color=CORES["accent"],
+            command=lambda v: self.crop_value_label.configure(text=f"{float(v):.2f}")
+        ).pack(side="right", padx=10)
+        
+        # Duração da célula
+        cell_frame = ctk.CTkFrame(pendulum_frame, fg_color="transparent")
+        cell_frame.pack(fill="x", pady=2)
+        ctk.CTkLabel(cell_frame, text="Célula (s):", text_color=CORES["text"], width=100).pack(side="left")
+        self.cell_value_label = ctk.CTkLabel(cell_frame, text=f"{self.pendulum_cell_duration_var.get():.0f}s", 
+                                            text_color=CORES["accent"], width=50)
+        self.cell_value_label.pack(side="right", padx=5)
+        ctk.CTkSlider(
+            cell_frame, from_=5.0, to=20.0, number_of_steps=15,
+            variable=self.pendulum_cell_duration_var, width=200,
+            progress_color=CORES["accent"], button_color=CORES["accent"],
+            command=lambda v: self.cell_value_label.configure(text=f"{float(v):.0f}s")
+        ).pack(side="right", padx=10)
+        
+        # Separador
+        ctk.CTkLabel(
+            self.single_image_mode_frame, text="Chroma Key (Overlay)",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color=CORES["text_dim"]
+        ).pack(anchor="w", padx=10, pady=(10, 5))
+        
+        chroma_frame = ctk.CTkFrame(self.single_image_mode_frame, fg_color="transparent")
+        chroma_frame.pack(fill="x", padx=10, pady=5)
+        
+        # Cor do Chroma
+        color_frame = ctk.CTkFrame(chroma_frame, fg_color="transparent")
+        color_frame.pack(fill="x", pady=2)
+        ctk.CTkLabel(color_frame, text="Cor (hex):", text_color=CORES["text"], width=100).pack(side="left")
+        ctk.CTkEntry(
+            color_frame, textvariable=self.chroma_color_var, width=100,
+            fg_color=CORES["bg_input"], border_color=CORES["accent"],
+            placeholder_text="00b140"
+        ).pack(side="left", padx=5)
+        
+        # Similarity
+        sim_frame = ctk.CTkFrame(chroma_frame, fg_color="transparent")
+        sim_frame.pack(fill="x", pady=2)
+        ctk.CTkLabel(sim_frame, text="Similarity:", text_color=CORES["text"], width=100).pack(side="left")
+        self.sim_value_label = ctk.CTkLabel(sim_frame, text=f"{self.chroma_similarity_var.get():.2f}", 
+                                           text_color=CORES["accent"], width=50)
+        self.sim_value_label.pack(side="right", padx=5)
+        ctk.CTkSlider(
+            sim_frame, from_=0.01, to=0.5, number_of_steps=49,
+            variable=self.chroma_similarity_var, width=200,
+            progress_color=CORES["accent"], button_color=CORES["accent"],
+            command=lambda v: self.sim_value_label.configure(text=f"{float(v):.2f}")
+        ).pack(side="right", padx=10)
+        
+        # Blend
+        blend_frame = ctk.CTkFrame(chroma_frame, fg_color="transparent")
+        blend_frame.pack(fill="x", pady=2)
+        ctk.CTkLabel(blend_frame, text="Blend:", text_color=CORES["text"], width=100).pack(side="left")
+        self.blend_value_label = ctk.CTkLabel(blend_frame, text=f"{self.chroma_blend_var.get():.2f}", 
+                                             text_color=CORES["accent"], width=50)
+        self.blend_value_label.pack(side="right", padx=5)
+        ctk.CTkSlider(
+            blend_frame, from_=0.0, to=0.5, number_of_steps=50,
+            variable=self.chroma_blend_var, width=200,
+            progress_color=CORES["accent"], button_color=CORES["accent"],
+            command=lambda v: self.blend_value_label.configure(text=f"{float(v):.2f}")
+        ).pack(side="right", padx=10)
+        
+        # Info final
+        ctk.CTkLabel(
+            self.single_image_mode_frame,
+            text="A célula base é loopada sem cortes visíveis até cobrir a duração do áudio",
+            text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
+        ).pack(anchor="w", padx=10, pady=(5, 10))
+
         # Mostrar painel correto
         self.toggle_video_mode()
 
     def toggle_video_mode(self):
-        """Alterna entre modo tradicional e Pipeline SRT."""
-        if self.use_srt_based_images_var.get():
-            self.traditional_mode_frame.pack_forget()
+        """Alterna entre modo tradicional, Pipeline SRT e Modo 1 Imagem."""
+        mode = self.video_mode_var.get()
+        
+        # Esconder todos os painéis
+        self.traditional_mode_frame.pack_forget()
+        self.srt_mode_frame.pack_forget()
+        if hasattr(self, 'single_image_mode_frame'):
+            self.single_image_mode_frame.pack_forget()
+        
+        if mode == "srt":
             self.srt_mode_frame.pack(fill="x", padx=15, pady=(5, 10))
             self.toggle_srt_source()
-        else:
-            self.srt_mode_frame.pack_forget()
+        elif mode == "single_image":
+            if hasattr(self, 'single_image_mode_frame'):
+                self.single_image_mode_frame.pack(fill="x", padx=15, pady=(5, 10))
+        else:  # traditional
             self.traditional_mode_frame.pack(fill="x", padx=15, pady=(5, 10))
             self.toggle_zoom_options()
 
@@ -7391,8 +7993,9 @@ v2.0 (Versão Base)
             "srt_source": self.subtitle_method_var.get(),  # Usar subtitle_method como srt_source
             "srt_path": self.srt_path_var.get(),
             "assemblyai_key": self.assemblyai_key_var.get(),
-            # Geração de Imagens via SRT
-            "use_srt_based_images": self.use_srt_based_images_var.get(),
+            # Modo de Vídeo
+            "video_mode": self.video_mode_var.get(),
+            "use_srt_based_images": self.video_mode_var.get() == "srt",  # Compatibilidade
             "image_source": self.image_source_var.get(),
             "images_backlog_folder": self.images_backlog_folder_var.get(),
             "whisk_api_tokens": get_enabled_tokens(),  # Carregado do whisk_keys.json
@@ -7440,7 +8043,17 @@ v2.0 (Versão Base)
             "backlog_audio_volume": self.config.get("backlog_audio_volume", 0.25),
             "backlog_transition_duration": self.config.get("backlog_transition_duration", 0.5),
             "backlog_fade_out_duration": self.config.get("backlog_fade_out_duration", 1.0),
-            "text_path": getattr(job, 'txt_path', None)
+            "text_path": getattr(job, 'txt_path', None),
+            # Modo 1 Imagem (Pêndulo)
+            "pendulum_amplitude": self.pendulum_amplitude_var.get(),
+            "pendulum_crop_ratio": self.pendulum_crop_ratio_var.get(),
+            "pendulum_zoom": self.pendulum_zoom_var.get(),
+            "pendulum_cell_duration": self.pendulum_cell_duration_var.get(),
+            "chroma_color": self.chroma_color_var.get(),
+            "chroma_similarity": self.chroma_similarity_var.get(),
+            "chroma_blend": self.chroma_blend_var.get(),
+            # Banco de imagens para modo single_image
+            "batch_images_folder": self.batch_images_var.get()
         }
 
     def update_job_progress(self, job, progress):
@@ -7769,12 +8382,14 @@ v2.0 (Versão Base)
         self.image_system = ImageReservationSystem(self.batch_images_var.get())
 
         # Verificar se ha imagens suficientes (apenas se NÃO estiver no modo de geração de imagens)
-        use_srt_images = self.use_srt_based_images_var.get()
+        video_mode = self.video_mode_var.get()
         image_source = self.image_source_var.get()
         
         # Se está usando Pipeline SRT com geração de imagens, não precisa verificar banco de imagens
-        if use_srt_images and image_source == "generate":
+        if video_mode == "srt" and image_source == "generate":
             self.log("Modo Pipeline SRT ativo - imagens serão geradas via API Whisk", "INFO")
+        elif video_mode == "single_image":
+            self.log("Modo 1 Imagem ativo - será usada 1 imagem aleatória do banco", "INFO")
         else:
             total_needed = len(self.batch_jobs) * self.images_per_video_var.get()
             available = self.image_system.get_available_count()

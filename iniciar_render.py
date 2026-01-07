@@ -7420,6 +7420,21 @@ class FinalSlideshowApp(ctk.CTk):
         )
         clear_btn.pack(side="right")
 
+        # Botao para copiar log
+        copy_btn = ctk.CTkButton(
+            log_header,
+            text="📋 Copiar Log",
+            width=100,
+            height=28,
+            font=ctk.CTkFont(size=11),
+            fg_color=CORES["accent"],
+            hover_color=CORES["accent_hover"],
+            text_color=CORES["text"],
+            corner_radius=6,
+            command=self.copy_log_to_clipboard
+        )
+        copy_btn.pack(side="right", padx=(0, 8))
+
         # Terminal-like log area
         self.log_text = ctk.CTkTextbox(
             log_frame,
@@ -7955,6 +7970,17 @@ v2.0 (Versão Base)
             except queue.Empty:
                 break
         self.after(100, self.process_log_queue)
+
+    def copy_log_to_clipboard(self):
+        """Copia todo o conteúdo do log para a área de transferência."""
+        log_content = self.log_text.get("1.0", "end-1c")
+        if log_content.strip():
+            self.clipboard_clear()
+            self.clipboard_append(log_content)
+            # Feedback visual temporário
+            self.log("📋 Log copiado para a área de transferência!", "INFO")
+        else:
+            messagebox.showinfo("Log Vazio", "Não há conteúdo no log para copiar.")
 
     def scan_folders(self):
         """Escaneia pastas e atualiza contadores."""

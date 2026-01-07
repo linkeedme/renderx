@@ -3699,14 +3699,14 @@ class VSLEngine:
             
             try:
                 # Verificar se a VSL tem áudio
-                cmd_check_audio = [
+                cmd_check_vsl_audio = [
                     "ffprobe", "-v", "error",
                     "-select_streams", "a:0",
                     "-show_entries", "stream=codec_type",
                     "-of", "csv=p=0",
                     vsl_path
                 ]
-                audio_check = subprocess.run(cmd_check_audio, capture_output=True, text=True,
+                audio_check = subprocess.run(cmd_check_vsl_audio, capture_output=True, text=True,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
                 vsl_has_audio = "audio" in audio_check.stdout.lower()
                 
@@ -3714,6 +3714,23 @@ class VSLEngine:
                     self.log("VSL tem audio - sera preservado", "INFO")
                 else:
                     self.log("VSL nao tem audio - sera adicionado silencio", "WARN")
+
+                # Verificar se o vídeo base tem áudio
+                cmd_check_base_audio = [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "a:0",
+                    "-show_entries", "stream=codec_type",
+                    "-of", "csv=p=0",
+                    video_path
+                ]
+                base_audio_check = subprocess.run(cmd_check_base_audio, capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                base_has_audio = "audio" in base_audio_check.stdout.lower()
+                
+                if base_has_audio:
+                    self.log("Video base tem audio", "INFO")
+                else:
+                    self.log("Video base NAO tem audio - sera adicionado silencio", "WARN")
 
                 # ============================================================
                 # MÉTODO ÚNICO: Usar filter_complex para concatenar tudo
@@ -3732,9 +3749,8 @@ class VSLEngine:
                 # Input 1: VSL
                 cmd.extend(["-i", vsl_path])
                 
-                # Input 2: Silêncio para VSL (se não tiver áudio)
-                if not vsl_has_audio:
-                    cmd.extend(["-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=48000"])
+                # Input 2: Silêncio (sempre adicionar para garantir áudio)
+                cmd.extend(["-f", "lavfi", "-i", f"anullsrc=channel_layout=stereo:sample_rate=48000"])
                 
                 # Construir filter_complex
                 filter_parts = []
@@ -3744,7 +3760,11 @@ class VSLEngine:
                 # Parte 1: Início do vídeo (0 até start_time_sec)
                 if has_part1:
                     filter_parts.append(f"[0:v]trim=0:{start_time_sec},setpts=PTS-STARTPTS,scale={base_width}:{base_height},fps=24[v0]")
-                    filter_parts.append(f"[0:a]atrim=0:{start_time_sec},asetpts=PTS-STARTPTS,aresample=48000[a0]")
+                    if base_has_audio:
+                        filter_parts.append(f"[0:a]atrim=0:{start_time_sec},asetpts=PTS-STARTPTS,aresample=48000[a0]")
+                    else:
+                        # Vídeo base não tem áudio - usar silêncio
+                        filter_parts.append(f"[2:a]atrim=0:{start_time_sec},asetpts=PTS-STARTPTS[a0]")
                     video_concat_inputs.append("[v0]")
                     audio_concat_inputs.append("[a0]")
                 
@@ -3763,7 +3783,12 @@ class VSLEngine:
                 # Parte 2: Continuação do vídeo (de start_time_sec até o fim)
                 if has_part2:
                     filter_parts.append(f"[0:v]trim={start_time_sec},setpts=PTS-STARTPTS,scale={base_width}:{base_height},fps=24[v2]")
-                    filter_parts.append(f"[0:a]atrim={start_time_sec},asetpts=PTS-STARTPTS,aresample=48000[a2]")
+                    if base_has_audio:
+                        filter_parts.append(f"[0:a]atrim={start_time_sec},asetpts=PTS-STARTPTS,aresample=48000[a2]")
+                    else:
+                        # Vídeo base não tem áudio - usar silêncio
+                        remaining_duration = base_duration - start_time_sec
+                        filter_parts.append(f"[2:a]atrim=0:{remaining_duration},asetpts=PTS-STARTPTS[a2]")
                     video_concat_inputs.append("[v2]")
                     audio_concat_inputs.append("[a2]")
                 
@@ -3799,7 +3824,8 @@ class VSLEngine:
                     self.log("Tentando método alternativo (arquivos separados)...", "WARN")
                     return self._insert_vsl_fallback(video_path, vsl_path, start_time_sec, output_path, 
                                                      use_gpu, temp_dir, base_width, base_height, 
-                                                     vsl_duration, base_duration, vsl_has_audio, encoder_args)
+                                                     vsl_duration, base_duration, vsl_has_audio, 
+                                                     base_has_audio, encoder_args)
                 
                 # Verificar resultado final
                 if not os.path.exists(output_path) or os.path.getsize(output_path) < 10000:
@@ -3830,10 +3856,13 @@ class VSLEngine:
 
     def _insert_vsl_fallback(self, video_path, vsl_path, start_time_sec, output_path, 
                              use_gpu, temp_dir, base_width, base_height, 
-                             vsl_duration, base_duration, vsl_has_audio, encoder_args):
+                             vsl_duration, base_duration, vsl_has_audio, 
+                             base_has_audio, encoder_args):
         """
         Método fallback para inserção de VSL usando arquivos separados.
         Usado quando o filter_complex falha.
+        
+        Agora suporta vídeos base sem áudio (modo 1 imagem).
         """
         try:
             has_part1 = start_time_sec > 0.5
@@ -3846,16 +3875,36 @@ class VSLEngine:
             
             if has_part1:
                 self.log(f"Extraindo Parte 1: 0s ate {start_time_sec:.2f}s", "DEBUG")
-                cmd_part1 = [
-                    "ffmpeg", "-y",
-                    "-i", video_path,
-                    "-t", str(start_time_sec),
-                    "-vf", f"scale={base_width}:{base_height},fps=24",
-                    *encoder_args,
-                    "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-                    "-pix_fmt", "yuv420p",
-                    part1_path
-                ]
+                
+                if base_has_audio:
+                    # Vídeo base tem áudio - copiar normalmente
+                    cmd_part1 = [
+                        "ffmpeg", "-y",
+                        "-i", video_path,
+                        "-t", str(start_time_sec),
+                        "-vf", f"scale={base_width}:{base_height},fps=24",
+                        *encoder_args,
+                        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                        "-pix_fmt", "yuv420p",
+                        part1_path
+                    ]
+                else:
+                    # Vídeo base NÃO tem áudio - adicionar silêncio
+                    cmd_part1 = [
+                        "ffmpeg", "-y",
+                        "-i", video_path,
+                        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                        "-t", str(start_time_sec),
+                        "-vf", f"scale={base_width}:{base_height},fps=24",
+                        "-map", "0:v",
+                        "-map", "1:a",
+                        *encoder_args,
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-pix_fmt", "yuv420p",
+                        "-shortest",
+                        part1_path
+                    ]
+                    
                 result = subprocess.run(cmd_part1, capture_output=True, text=True,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
                 if result.returncode != 0:
@@ -3908,16 +3957,38 @@ class VSLEngine:
             
             if has_part2:
                 self.log(f"Extraindo Parte 2: {start_time_sec:.2f}s ate {base_duration:.2f}s", "DEBUG")
-                cmd_part2 = [
-                    "ffmpeg", "-y",
-                    "-ss", str(start_time_sec),
-                    "-i", video_path,
-                    "-vf", f"scale={base_width}:{base_height},fps=24",
-                    *encoder_args,
-                    "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-                    "-pix_fmt", "yuv420p",
-                    part2_path
-                ]
+                
+                if base_has_audio:
+                    # Vídeo base tem áudio - copiar normalmente
+                    cmd_part2 = [
+                        "ffmpeg", "-y",
+                        "-ss", str(start_time_sec),
+                        "-i", video_path,
+                        "-vf", f"scale={base_width}:{base_height},fps=24",
+                        *encoder_args,
+                        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+                        "-pix_fmt", "yuv420p",
+                        part2_path
+                    ]
+                else:
+                    # Vídeo base NÃO tem áudio - adicionar silêncio
+                    remaining_duration = base_duration - start_time_sec
+                    cmd_part2 = [
+                        "ffmpeg", "-y",
+                        "-ss", str(start_time_sec),
+                        "-i", video_path,
+                        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                        "-t", str(remaining_duration),
+                        "-vf", f"scale={base_width}:{base_height},fps=24",
+                        "-map", "0:v",
+                        "-map", "1:a",
+                        *encoder_args,
+                        "-c:a", "aac", "-b:a", "192k",
+                        "-pix_fmt", "yuv420p",
+                        "-shortest",
+                        part2_path
+                    ]
+                    
                 result = subprocess.run(cmd_part2, capture_output=True, text=True,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
                 if result.returncode != 0:
@@ -3926,7 +3997,7 @@ class VSLEngine:
                 self.log(f"Parte 2 OK", "OK")
             
             # ============================================================
-            # CONCATENAR com filter_complex (mais confiável que concat demuxer)
+            # CONCATENAR usando concat demuxer (mais robusto para arquivos preparados)
             # ============================================================
             parts = []
             if has_part1 and os.path.exists(part1_path):
@@ -3935,34 +4006,60 @@ class VSLEngine:
             if has_part2 and os.path.exists(part2_path):
                 parts.append(part2_path)
             
-            self.log(f"Concatenando {len(parts)} partes...", "INFO")
+            self.log(f"Concatenando {len(parts)} partes com concat demuxer...", "INFO")
             
-            # Usar filter_complex para concatenar
-            cmd = ["ffmpeg", "-y"]
-            for p in parts:
-                cmd.extend(["-i", p])
+            # Criar arquivo de lista para concat demuxer
+            concat_list_path = os.path.join(temp_dir, "concat_list.txt")
+            with open(concat_list_path, "w", encoding="utf-8") as f:
+                for p in parts:
+                    # Escapar caracteres especiais no caminho
+                    escaped_path = p.replace("\\", "/").replace("'", "'\\''")
+                    f.write(f"file '{escaped_path}'\n")
             
-            n = len(parts)
-            filter_v = "".join([f"[{i}:v]" for i in range(n)]) + f"concat=n={n}:v=1:a=0[vout]"
-            filter_a = "".join([f"[{i}:a]" for i in range(n)]) + f"concat=n={n}:v=0:a=1[aout]"
-            
-            cmd.extend([
-                "-filter_complex", f"{filter_v};{filter_a}",
-                "-map", "[vout]",
-                "-map", "[aout]",
-                *encoder_args,
-                "-c:a", "aac", "-b:a", "192k",
-                "-pix_fmt", "yuv420p",
+            # Usar concat demuxer - mais confiável quando os arquivos já estão preparados
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_list_path,
+                "-c", "copy",  # Copiar streams sem re-encoding (mais rápido)
                 "-movflags", "+faststart",
                 output_path
-            ])
+            ]
             
             result = subprocess.run(cmd, capture_output=True, text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
             
             if result.returncode != 0:
-                self.log(f"Erro ao concatenar: {result.stderr[-400:] if result.stderr else ''}", "ERROR")
-                return None
+                self.log(f"Erro no concat demuxer: {result.stderr[-400:] if result.stderr else ''}", "WARN")
+                
+                # Fallback: Re-encode com filter_complex
+                self.log("Tentando re-encode com filter_complex...", "INFO")
+                cmd = ["ffmpeg", "-y"]
+                for p in parts:
+                    cmd.extend(["-i", p])
+                
+                n = len(parts)
+                filter_v = "".join([f"[{i}:v]" for i in range(n)]) + f"concat=n={n}:v=1:a=0[vout]"
+                filter_a = "".join([f"[{i}:a]" for i in range(n)]) + f"concat=n={n}:v=0:a=1[aout]"
+                
+                cmd.extend([
+                    "-filter_complex", f"{filter_v};{filter_a}",
+                    "-map", "[vout]",
+                    "-map", "[aout]",
+                    *encoder_args,
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    output_path
+                ])
+                
+                result = subprocess.run(cmd, capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                
+                if result.returncode != 0:
+                    self.log(f"Erro ao concatenar: {result.stderr[-400:] if result.stderr else ''}", "ERROR")
+                    return None
             
             if not os.path.exists(output_path) or os.path.getsize(output_path) < 10000:
                 self.log("Video final nao foi criado corretamente", "ERROR")

@@ -1330,38 +1330,25 @@ class FinalSlideshowEngine:
             vsl_end = vsl_start + vsl_duration
             
             # Estratégia:
-            # 1. Criar áudio mixado (narração + música) para a duração total do vídeo ORIGINAL (sem VSL)
-            # 2. Cortar esse áudio em parte1 (0 até vsl_start) e parte2 (vsl_start até fim)
-            # 3. Extrair áudio da VSL do vídeo (já está embutido)
-            # 4. Concatenar: parte1_mixado + audio_vsl + parte2_mixado
-            # 5. Combinar com vídeo
+            # 1. Criar áudio mixado (narração + música) para a duração total
+            # 2. Usar asplit para dividir em duas cópias (FFmpeg não permite usar mesmo stream 2x)
+            # 3. Cortar parte1 (0 até vsl_start) e parte2 (de vsl_start em diante)
+            # 4. Extrair áudio da VSL do vídeo (já está embutido)
+            # 5. Concatenar: parte1_mixado + audio_vsl + parte2_mixado
             
-            # Obter duração do vídeo (que agora inclui a VSL)
-            video_duration = self.get_audio_duration(video_path)
-            if not video_duration:
-                video_duration = 838.0  # fallback
-            
-            # Duração original do áudio de narração (sem a VSL)
-            narration_duration = self.get_audio_duration(narration_path)
-            if not narration_duration:
-                narration_duration = video_duration - vsl_duration
-            
-            # Filter complex para:
-            # 1. Mixar narração + música
-            # 2. Cortar em parte1 (0 até vsl_start) e parte2 (após vsl_start, que continua depois da VSL)
-            # 3. Extrair áudio da VSL do vídeo (input 0)
-            # 4. Concatenar tudo
-            
+            # Filter complex com asplit para poder usar o stream mixado duas vezes
             filter_complex = (
                 # Preparar música de fundo com loop e volume
                 f"[2:a]volume={music_volume},aloop=loop=-1:size=2e+09[bg];"
                 # Mixar narração com música de fundo
                 f"[1:a][bg]amix=inputs=2:duration=first[mixed];"
+                # IMPORTANTE: Usar asplit para criar duas cópias do áudio mixado
+                f"[mixed]asplit=2[mixed1][mixed2];"
                 # Parte 1 do áudio mixado (0 até vsl_start)
-                f"[mixed]atrim=0:{vsl_start},asetpts=PTS-STARTPTS[mix_part1];"
+                f"[mixed1]atrim=0:{vsl_start},asetpts=PTS-STARTPTS[mix_part1];"
                 # Parte 2 do áudio mixado (de vsl_start em diante - continua após a VSL)
-                f"[mixed]atrim={vsl_start},asetpts=PTS-STARTPTS[mix_part2];"
-                # Extrair áudio da VSL do vídeo (de vsl_start até vsl_end)
+                f"[mixed2]atrim={vsl_start},asetpts=PTS-STARTPTS[mix_part2];"
+                # Extrair áudio da VSL do vídeo (de vsl_start até vsl_end no vídeo final)
                 f"[0:a]atrim={vsl_start}:{vsl_end},asetpts=PTS-STARTPTS[vsl_audio];"
                 # Concatenar: parte1 + áudio_vsl + parte2
                 f"[mix_part1][vsl_audio][mix_part2]concat=n=3:v=0:a=1[aout]"
@@ -1462,10 +1449,12 @@ class FinalSlideshowEngine:
             vsl_end = vsl_start + vsl_duration
             
             filter_complex = (
+                # IMPORTANTE: Usar asplit para criar duas cópias da narração
+                f"[1:a]asplit=2[narr1][narr2];"
                 # Parte 1 da narração (0 até vsl_start)
-                f"[1:a]atrim=0:{vsl_start},asetpts=PTS-STARTPTS[narr_part1];"
+                f"[narr1]atrim=0:{vsl_start},asetpts=PTS-STARTPTS[narr_part1];"
                 # Parte 2 da narração (de vsl_start em diante)
-                f"[1:a]atrim={vsl_start},asetpts=PTS-STARTPTS[narr_part2];"
+                f"[narr2]atrim={vsl_start},asetpts=PTS-STARTPTS[narr_part2];"
                 # Extrair áudio da VSL do vídeo
                 f"[0:a]atrim={vsl_start}:{vsl_end},asetpts=PTS-STARTPTS[vsl_audio];"
                 # Concatenar: narração_parte1 + áudio_vsl + narração_parte2
@@ -3898,7 +3887,7 @@ class VSLEngine:
                 
                 # Parte 1: Início do vídeo (0 até start_time_sec)
                 if has_part1:
-                    filter_parts.append(f"[0:v]trim=0:{start_time_sec},setpts=PTS-STARTPTS,scale={base_width}:{base_height},fps=24[v0]")
+                    filter_parts.append(f"[0:v]trim=0:{start_time_sec},setpts=PTS-STARTPTS,scale={base_width}:{base_height},fps=24,setsar=1[v0]")
                     if base_has_audio:
                         filter_parts.append(f"[0:a]atrim=0:{start_time_sec},asetpts=PTS-STARTPTS,aresample=48000[a0]")
                     else:
@@ -3908,8 +3897,8 @@ class VSLEngine:
                     video_concat_inputs.append("[v0]")
                     audio_concat_inputs.append("[a0]")
                 
-                # VSL: Redimensionar e preparar
-                filter_parts.append(f"[1:v]scale={base_width}:{base_height}:force_original_aspect_ratio=decrease,pad={base_width}:{base_height}:(ow-iw)/2:(oh-ih)/2:color=black,setpts=PTS-STARTPTS,fps=24[v1]")
+                # VSL: Redimensionar e preparar (trim para garantir duração exata)
+                filter_parts.append(f"[1:v]trim=0:{vsl_duration},setpts=PTS-STARTPTS,scale={base_width}:{base_height}:force_original_aspect_ratio=decrease,pad={base_width}:{base_height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=24,setsar=1[v1]")
                 video_concat_inputs.append("[v1]")
                 
                 if vsl_has_audio:
@@ -3923,7 +3912,7 @@ class VSLEngine:
                 
                 # Parte 2: Continuação do vídeo (de start_time_sec até o fim)
                 if has_part2:
-                    filter_parts.append(f"[0:v]trim={start_time_sec},setpts=PTS-STARTPTS,scale={base_width}:{base_height},fps=24[v2]")
+                    filter_parts.append(f"[0:v]trim={start_time_sec}:{base_duration},setpts=PTS-STARTPTS,scale={base_width}:{base_height},fps=24,setsar=1[v2]")
                     if base_has_audio:
                         filter_parts.append(f"[0:a]atrim={start_time_sec},asetpts=PTS-STARTPTS,aresample=48000[a2]")
                     else:

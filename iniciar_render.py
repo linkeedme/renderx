@@ -8691,6 +8691,222 @@ v2.0 (Versão Base)
 
         return success_count > 0
 
+    def _generate_missing_audios_threaded(self):
+        """
+        Versão thread-safe da geração de áudios.
+        Esta função roda em uma thread separada para não bloquear a UI.
+        """
+        if not self.tts_enabled_var.get():
+            return True
+
+        provider = self.tts_provider_var.get()
+        if provider == "none":
+            self.log("TTS desabilitado ou provider não selecionado", "WARNING")
+            return True
+
+        api_key_raw = self.darkvi_api_key_var.get() if provider == "darkvi" else self.talkify_api_key_var.get()
+        api_key = api_key_raw.strip() if api_key_raw else ""
+        
+        # Pegar voice_id já atualizado (foi atualizado na thread principal antes de chamar esta função)
+        voice_id = self.tts_voice_id_var.get()
+
+        if not api_key or not api_key.strip():
+            self.log("API key não configurada!", "ERROR")
+            self.after(0, lambda: messagebox.showerror("Erro", f"Configure a API key do {provider.upper()}!"))
+            return False
+
+        if not voice_id or not voice_id.strip():
+            self.log("Voz não selecionada!", "ERROR")
+            self.after(0, lambda: messagebox.showerror("Erro", "Selecione uma voz primeiro!\n\nClique em 'Carregar Vozes' e selecione uma voz no dropdown."))
+            return False
+
+        # Importar TTSGenerator
+        try:
+            from tts_integration import TTSGenerator
+        except ImportError:
+            self.log("Erro ao importar tts_integration", "ERROR")
+            return False
+
+        # Criar callback de log thread-safe (já usa queue internamente)
+        def log_callback(msg, level="INFO"):
+            self.log(msg, level)
+        
+        # Log do token (primeiros e últimos caracteres para debug)
+        if api_key:
+            token_preview = f"{api_key[:10]}...{api_key[-10:]}" if len(api_key) > 20 else api_key[:10] + "..."
+            self.log(f"Token formatado: {token_preview} (tamanho: {len(api_key)} chars)", "DEBUG")
+        
+        generator = TTSGenerator(provider, api_key, log_callback)
+        is_valid, error_msg = generator.validate_config()
+        if not is_valid:
+            self.log(f"Configuração TTS inválida: {error_msg}", "ERROR")
+            self.after(0, lambda: messagebox.showerror("Erro", f"Configuração TTS inválida:\n{error_msg}"))
+            return False
+
+        input_root = self.batch_input_var.get()
+        audio_folder_name = self.generated_audio_folder_var.get()
+        
+        # Encontrar todos os .txt sem áudio correspondente
+        txt_files_to_process = []
+        file_groups = {}
+
+        for root, dirs, files in os.walk(input_root):
+            rel_path = os.path.relpath(root, input_root)
+            if rel_path == ".":
+                rel_path_key = ""
+            else:
+                rel_path_key = rel_path
+            
+            is_in_generated_folder = False
+            if audio_folder_name:
+                path_parts = rel_path_key.split(os.path.sep) if rel_path_key else []
+                if audio_folder_name in path_parts:
+                    is_in_generated_folder = True
+
+            for f in files:
+                base_name = os.path.splitext(f)[0]
+                ext = os.path.splitext(f)[1].lower()
+                full_path = os.path.join(root, f)
+                
+                if is_in_generated_folder:
+                    path_parts = rel_path_key.split(os.path.sep)
+                    base_rel_parts = [p for p in path_parts if p != audio_folder_name]
+                    base_rel_path = os.path.sep.join(base_rel_parts) if base_rel_parts else ""
+                else:
+                    base_rel_path = rel_path_key
+                
+                key = (base_name, base_rel_path)
+                
+                if key not in file_groups:
+                    file_groups[key] = {"txt_path": None, "audio_path": None, "rel_path": base_rel_path}
+                
+                if ext in TEXT_EXTENSIONS and not is_in_generated_folder:
+                    file_groups[key]["txt_path"] = full_path
+                elif ext in AUDIO_EXTENSIONS:
+                    file_groups[key]["audio_path"] = full_path
+
+        # Identificar txts sem áudio
+        for (base_name, rel_path_key), group in file_groups.items():
+            txt_path = group["txt_path"]
+            audio_path = group["audio_path"]
+            
+            if txt_path and not audio_path:
+                if audio_folder_name:
+                    txt_dir = os.path.dirname(txt_path)
+                    possible_audio_dir = os.path.join(txt_dir, audio_folder_name)
+                    possible_audio_path = os.path.join(possible_audio_dir, f"{base_name}.mp3")
+                    
+                    if os.path.exists(possible_audio_path):
+                        self.log(f"Áudio já existe em subpasta: {base_name}.mp3", "DEBUG")
+                        continue
+                
+                txt_files_to_process.append({
+                    "txt_path": txt_path,
+                    "base_name": base_name,
+                    "rel_path": group["rel_path"]
+                })
+
+        if not txt_files_to_process:
+            self.log("Nenhum áudio precisa ser gerado", "INFO")
+            return True
+
+        total_audios = len(txt_files_to_process)
+        self.log(f"Gerando {total_audios} áudio(s) via {provider.upper()}...", "INFO")
+        
+        # Atualizar label de progresso na UI (thread-safe via after)
+        self.after(0, lambda: self.progress_label_total.configure(text=f"Gerando áudios: 0/{total_audios}"))
+
+        # Gerar áudios
+        success_count = 0
+        error_count = 0
+
+        for i, item in enumerate(txt_files_to_process, 1):
+            # Verificar cancelamento
+            if self.cancel_requested:
+                self.log("Geração de áudios cancelada pelo usuário", "WARNING")
+                break
+                
+            txt_path = item["txt_path"]
+            base_name = item["base_name"]
+            rel_path = item["rel_path"]
+
+            # Determinar onde salvar o áudio
+            if rel_path == "":
+                audio_dir = input_root
+            else:
+                audio_dir = os.path.join(input_root, rel_path)
+
+            # Criar subpasta para áudios gerados se configurado
+            if audio_folder_name:
+                audio_dir = os.path.join(audio_dir, audio_folder_name)
+                os.makedirs(audio_dir, exist_ok=True)
+
+            audio_path = os.path.join(audio_dir, f"{base_name}.mp3")
+
+            # Verificar se já existe
+            if os.path.exists(audio_path):
+                self.log(f"[{i}/{total_audios}] Áudio já existe: {base_name}.mp3", "INFO")
+                success_count += 1
+                # Atualizar progresso na UI
+                progress_i = i
+                self.after(0, lambda p=progress_i: self.progress_label_total.configure(text=f"Gerando áudios: {p}/{total_audios}"))
+                self.after(0, lambda p=progress_i, t=total_audios: self.progress_bar_total.set(p / t))
+                continue
+
+            # Ler texto do arquivo
+            try:
+                with open(txt_path, "r", encoding="utf-8") as f:
+                    text = f.read().strip()
+                
+                if not text:
+                    self.log(f"[{i}/{total_audios}] Arquivo vazio: {base_name}.txt", "WARNING")
+                    error_count += 1
+                    continue
+
+                self.log(f"[{i}/{total_audios}] Gerando áudio: {base_name}...", "INFO")
+                
+                # Atualizar UI com nome do áudio atual
+                current_name = base_name
+                self.after(0, lambda n=current_name: self.current_video_label.configure(text=f"Gerando: {n}..."))
+
+                # Gerar áudio
+                title = f"{base_name} (gerado automaticamente)"
+                success = generator.generate_audio(text, voice_id, audio_path, title)
+
+                if success and os.path.exists(audio_path):
+                    self.log(f"[{i}/{total_audios}] Áudio gerado: {base_name}.mp3", "OK")
+                    success_count += 1
+                else:
+                    self.log(f"[{i}/{total_audios}] Falha ao gerar: {base_name}.txt", "ERROR")
+                    error_count += 1
+                
+                # Atualizar progresso na UI
+                progress_i = i
+                self.after(0, lambda p=progress_i: self.progress_label_total.configure(text=f"Gerando áudios: {p}/{total_audios}"))
+                self.after(0, lambda p=progress_i, t=total_audios: self.progress_bar_total.set(p / t))
+
+            except Exception as e:
+                self.log(f"[{i}/{total_audios}] Erro ao processar {base_name}.txt: {str(e)}", "ERROR")
+                error_count += 1
+
+        # Resumo
+        self.log(f"Geração concluída: {success_count} sucesso, {error_count} erros", "INFO")
+        
+        # Resetar barra de progresso para o render de vídeos
+        self.after(0, lambda: self.progress_bar_total.set(0))
+        self.after(0, lambda: self.progress_label_total.configure(text="Aguardando início..."))
+
+        if error_count > 0:
+            # Usar after para mostrar messagebox na thread principal
+            self.after(0, lambda: messagebox.showwarning(
+                "Aviso",
+                f"Geração de áudios concluída com erros:\n"
+                f"Sucesso: {success_count}\n"
+                f"Erros: {error_count}"
+            ))
+
+        return success_count > 0 or error_count == 0
+
     def start_batch_render(self):
         """Inicia processamento em lote."""
         if not self.validate_batch_inputs():
@@ -8699,22 +8915,55 @@ v2.0 (Versão Base)
         self.save_config()
         self.log_text.delete("1.0", "end")
 
-        # Gerar áudios faltantes via API (se habilitado)
+        # Desabilitar botões imediatamente para feedback visual
+        self.render_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="normal")
+
+        # Se TTS está habilitado, gerar áudios em thread separada primeiro
         if self.tts_enabled_var.get():
             self.log("Verificando áudios a gerar...", "INFO")
-            if not self.generate_missing_audios():
-                if not messagebox.askyesno(
-                    "Aviso",
-                    "Houve erros na geração de áudios.\n"
-                    "Deseja continuar com os áudios disponíveis?"
-                ):
-                    return
+            self.current_video_label.configure(text="Gerando áudios via API...")
+            
+            # Atualizar voice_id do combobox ANTES de iniciar a thread (na thread principal)
+            self.update_voice_id_from_combo()
+            
+            # Executar geração de áudios em thread separada
+            def audio_generation_thread():
+                try:
+                    success = self._generate_missing_audios_threaded()
+                    # Voltar para a thread principal para continuar
+                    self.after(0, lambda: self._continue_batch_render_after_audio(success))
+                except Exception as e:
+                    self.log(f"Erro na geração de áudios: {str(e)}", "ERROR")
+                    self.after(0, lambda: self._continue_batch_render_after_audio(False))
+            
+            threading.Thread(target=audio_generation_thread, daemon=True).start()
+        else:
+            # Sem TTS, continuar diretamente
+            self._continue_batch_render_after_audio(True)
+
+    def _continue_batch_render_after_audio(self, audio_success):
+        """Continua o processamento em lote após geração de áudios."""
+        # Se houve erro na geração de áudios, perguntar se deseja continuar
+        if not audio_success:
+            if not messagebox.askyesno(
+                "Aviso",
+                "Houve erros na geração de áudios.\n"
+                "Deseja continuar com os áudios disponíveis?"
+            ):
+                self.render_btn.configure(state="normal")
+                self.cancel_btn.configure(state="disabled")
+                self.current_video_label.configure(text="Aguardando...")
+                return
 
         # Criar jobs (agora incluindo áudios gerados)
         self.batch_jobs = self.scan_batch_folder()
 
         if not self.batch_jobs:
             messagebox.showinfo("Aviso", "Nenhum audio novo encontrado para processar.")
+            self.render_btn.configure(state="normal")
+            self.cancel_btn.configure(state="disabled")
+            self.current_video_label.configure(text="Aguardando...")
             return
 
         # Inicializar sistema de imagens
@@ -8742,6 +8991,8 @@ v2.0 (Versão Base)
                     f"Deseja continuar mesmo assim?\n"
                     f"(Alguns videos podem falhar)"
                 ):
+                    self.render_btn.configure(state="normal")
+                    self.cancel_btn.configure(state="disabled")
                     return
 
         # Resetar estado
@@ -8754,8 +9005,6 @@ v2.0 (Versão Base)
             self.batch_queue.put(job)
 
         # Atualizar UI
-        self.render_btn.configure(state="disabled")
-        self.cancel_btn.configure(state="normal")
         self.progress_bar_current.set(0)
         self.progress_bar_total.set(0)
         self.update_batch_ui()

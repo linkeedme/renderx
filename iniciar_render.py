@@ -1278,7 +1278,12 @@ class FinalSlideshowEngine:
     # MIXAGEM DE AUDIO
     # =========================================================================
     def mix_audio(self, video_path, narration_path, music_path, output_path, music_volume=0.2, config=None):
-        """Mixa narracao com musica de fundo."""
+        """
+        Mixa narracao com musica de fundo.
+        
+        Se houver VSL inserida no vídeo, preserva o áudio da VSL durante seu intervalo
+        e aplica narração + música apenas nas partes fora da VSL.
+        """
         self.log(f"Mixando audio (musica: {music_volume:.0%})...", "INFO")
 
         # Verificar se deve usar backlog de áudios (apenas para música de fundo)
@@ -1311,23 +1316,93 @@ class FinalSlideshowEngine:
         else:
             encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-i", narration_path,
-            "-stream_loop", "-1",
-            "-i", music_path,
-            "-filter_complex",
-            f"[2:a]volume={music_volume}[bg];"
-            f"[1:a][bg]amix=inputs=2:duration=first[aout]",
-            "-map", "0:v",
-            "-map", "[aout]",
-            *encoder_args,
-            "-c:a", "aac", "-b:a", "192k",
-            "-pix_fmt", "yuv420p",
-            "-shortest",
-            output_path
-        ]
+        # Verificar se há VSL inserida - se sim, precisamos preservar o áudio da VSL
+        vsl_start = config.get("vsl_inserted_start") if config else None
+        vsl_duration = config.get("vsl_inserted_duration") if config else None
+        
+        if vsl_start is not None and vsl_duration is not None:
+            # ============================================================
+            # MODO COM VSL: Preservar áudio da VSL, aplicar narração+música fora
+            # ============================================================
+            self.log(f"VSL detectada: {vsl_start:.2f}s - {vsl_start + vsl_duration:.2f}s", "INFO")
+            self.log("Preservando áudio da VSL durante mixagem...", "INFO")
+            
+            vsl_end = vsl_start + vsl_duration
+            
+            # Estratégia:
+            # 1. Criar áudio mixado (narração + música) para a duração total do vídeo ORIGINAL (sem VSL)
+            # 2. Cortar esse áudio em parte1 (0 até vsl_start) e parte2 (vsl_start até fim)
+            # 3. Extrair áudio da VSL do vídeo (já está embutido)
+            # 4. Concatenar: parte1_mixado + audio_vsl + parte2_mixado
+            # 5. Combinar com vídeo
+            
+            # Obter duração do vídeo (que agora inclui a VSL)
+            video_duration = self.get_audio_duration(video_path)
+            if not video_duration:
+                video_duration = 838.0  # fallback
+            
+            # Duração original do áudio de narração (sem a VSL)
+            narration_duration = self.get_audio_duration(narration_path)
+            if not narration_duration:
+                narration_duration = video_duration - vsl_duration
+            
+            # Filter complex para:
+            # 1. Mixar narração + música
+            # 2. Cortar em parte1 (0 até vsl_start) e parte2 (após vsl_start, que continua depois da VSL)
+            # 3. Extrair áudio da VSL do vídeo (input 0)
+            # 4. Concatenar tudo
+            
+            filter_complex = (
+                # Preparar música de fundo com loop e volume
+                f"[2:a]volume={music_volume},aloop=loop=-1:size=2e+09[bg];"
+                # Mixar narração com música de fundo
+                f"[1:a][bg]amix=inputs=2:duration=first[mixed];"
+                # Parte 1 do áudio mixado (0 até vsl_start)
+                f"[mixed]atrim=0:{vsl_start},asetpts=PTS-STARTPTS[mix_part1];"
+                # Parte 2 do áudio mixado (de vsl_start em diante - continua após a VSL)
+                f"[mixed]atrim={vsl_start},asetpts=PTS-STARTPTS[mix_part2];"
+                # Extrair áudio da VSL do vídeo (de vsl_start até vsl_end)
+                f"[0:a]atrim={vsl_start}:{vsl_end},asetpts=PTS-STARTPTS[vsl_audio];"
+                # Concatenar: parte1 + áudio_vsl + parte2
+                f"[mix_part1][vsl_audio][mix_part2]concat=n=3:v=0:a=1[aout]"
+            )
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,      # Input 0: vídeo com VSL (tem áudio da VSL embutido)
+                "-i", narration_path,  # Input 1: narração
+                "-stream_loop", "-1",
+                "-i", music_path,      # Input 2: música de fundo
+                "-filter_complex", filter_complex,
+                "-map", "0:v",
+                "-map", "[aout]",
+                *encoder_args,
+                "-c:a", "aac", "-b:a", "192k",
+                "-pix_fmt", "yuv420p",
+                "-shortest",
+                output_path
+            ]
+        else:
+            # ============================================================
+            # MODO SEM VSL: Mixagem normal
+            # ============================================================
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-i", narration_path,
+                "-stream_loop", "-1",
+                "-i", music_path,
+                "-filter_complex",
+                f"[2:a]volume={music_volume}[bg];"
+                f"[1:a][bg]amix=inputs=2:duration=first[aout]",
+                "-map", "0:v",
+                "-map", "[aout]",
+                *encoder_args,
+                "-c:a", "aac", "-b:a", "192k",
+                "-pix_fmt", "yuv420p",
+                "-shortest",
+                output_path
+            ]
 
         result = subprocess.run(
             cmd,
@@ -1337,7 +1412,7 @@ class FinalSlideshowEngine:
         )
 
         if result.returncode != 0:
-            self.log(f"Erro na mixagem: {result.stderr[-200:] if result.stderr else ''}", "ERROR")
+            self.log(f"Erro na mixagem: {result.stderr[-300:] if result.stderr else ''}", "ERROR")
             return None
 
         # Registrar áudio de fundo usado no backlog (se estava usando backlog)
@@ -1359,8 +1434,12 @@ class FinalSlideshowEngine:
     # =========================================================================
     # FINALIZACAO SIMPLES (SO AUDIO)
     # =========================================================================
-    def finalize_simple(self, video_path, audio_path, output_path):
-        """Adiciona apenas o audio principal."""
+    def finalize_simple(self, video_path, audio_path, output_path, config=None):
+        """
+        Adiciona apenas o audio principal (narração).
+        
+        Se houver VSL inserida, preserva o áudio da VSL e aplica narração apenas fora.
+        """
         self.log("Finalizando video (adicionando audio)...", "INFO")
 
         use_gpu = self.check_gpu_available()
@@ -1369,18 +1448,59 @@ class FinalSlideshowEngine:
         else:
             encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-i", audio_path,
-            "-map", "0:v",
-            "-map", "1:a",
-            *encoder_args,
-            "-c:a", "aac", "-b:a", "192k",
-            "-pix_fmt", "yuv420p",
-            "-shortest",
-            output_path
-        ]
+        # Verificar se há VSL inserida
+        vsl_start = config.get("vsl_inserted_start") if config else None
+        vsl_duration = config.get("vsl_inserted_duration") if config else None
+        
+        if vsl_start is not None and vsl_duration is not None:
+            # ============================================================
+            # MODO COM VSL: Preservar áudio da VSL, aplicar narração fora
+            # ============================================================
+            self.log(f"VSL detectada: {vsl_start:.2f}s - {vsl_start + vsl_duration:.2f}s", "INFO")
+            self.log("Preservando áudio da VSL...", "INFO")
+            
+            vsl_end = vsl_start + vsl_duration
+            
+            filter_complex = (
+                # Parte 1 da narração (0 até vsl_start)
+                f"[1:a]atrim=0:{vsl_start},asetpts=PTS-STARTPTS[narr_part1];"
+                # Parte 2 da narração (de vsl_start em diante)
+                f"[1:a]atrim={vsl_start},asetpts=PTS-STARTPTS[narr_part2];"
+                # Extrair áudio da VSL do vídeo
+                f"[0:a]atrim={vsl_start}:{vsl_end},asetpts=PTS-STARTPTS[vsl_audio];"
+                # Concatenar: narração_parte1 + áudio_vsl + narração_parte2
+                f"[narr_part1][vsl_audio][narr_part2]concat=n=3:v=0:a=1[aout]"
+            )
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,   # Input 0: vídeo com VSL
+                "-i", audio_path,   # Input 1: narração
+                "-filter_complex", filter_complex,
+                "-map", "0:v",
+                "-map", "[aout]",
+                *encoder_args,
+                "-c:a", "aac", "-b:a", "192k",
+                "-pix_fmt", "yuv420p",
+                "-shortest",
+                output_path
+            ]
+        else:
+            # ============================================================
+            # MODO SEM VSL: Adicionar narração normalmente
+            # ============================================================
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-i", audio_path,
+                "-map", "0:v",
+                "-map", "1:a",
+                *encoder_args,
+                "-c:a", "aac", "-b:a", "192k",
+                "-pix_fmt", "yuv420p",
+                "-shortest",
+                output_path
+            ]
 
         result = subprocess.run(
             cmd,
@@ -3064,7 +3184,12 @@ class FinalSlideshowEngine:
                     
                     if result:
                         current_video = video_with_vsl
+                        # Salvar dados da VSL no config para uso na mixagem de áudio
+                        # Isso permite que mix_audio preserve o áudio da VSL
+                        config["vsl_inserted_start"] = vsl_start_sec
+                        config["vsl_inserted_duration"] = vsl_duration
                         self.log("VSL inserido com sucesso na camada superior (acima das legendas)!", "OK")
+                        self.log(f"Dados VSL salvos para mixagem: início={vsl_start_sec:.2f}s, duração={vsl_duration:.2f}s", "DEBUG")
                     else:
                         self.log("Falha ao inserir VSL. Continuando sem VSL.", "WARN")
                         
@@ -3139,13 +3264,13 @@ class FinalSlideshowEngine:
                 else:
                     # Fallback para audio simples
                     self.log("Falha na mixagem, usando apenas narração", "WARN")
-                    self.finalize_simple(current_video, config["audio_path"], output_path)
+                    self.finalize_simple(current_video, config["audio_path"], output_path, config)
             else:
                 if music_path:
                     self.log(f"Arquivo de música não encontrado: {music_path}", "WARN")
                 else:
                     self.log("Nenhuma música de fundo configurada", "INFO")
-                self.finalize_simple(current_video, config["audio_path"], output_path)
+                self.finalize_simple(current_video, config["audio_path"], output_path, config)
 
             # Limpar temp
             shutil.rmtree(temp_dir, ignore_errors=True)

@@ -3264,6 +3264,7 @@ class VSLEngine:
                     self.log("Parte 1 extraída (antes da VSL)", "DEBUG")
                 
                 # PARTE 2: Preparar o VSL (redimensionar para resolução do vídeo base)
+                # IMPORTANTE: Manter o áudio original da VSL!
                 vsl_prepared_path = os.path.join(temp_dir, "vsl_prepared.mp4")
                 cmd_vsl = [
                     "ffmpeg", "-y",
@@ -3271,7 +3272,7 @@ class VSLEngine:
                     "-vf", f"scale={base_width}:{base_height}:force_original_aspect_ratio=decrease,pad={base_width}:{base_height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=24",
                     "-t", str(vsl_duration),  # Limitar duração se necessário
                     *encoder_args,
-                    "-an",  # Remover áudio do VSL (manter áudio original do vídeo)
+                    "-c:a", "aac", "-b:a", "192k",  # MANTER áudio da VSL
                     "-pix_fmt", "yuv420p",
                     vsl_prepared_path
                 ]
@@ -3280,7 +3281,7 @@ class VSLEngine:
                 if result.returncode != 0:
                     self.log(f"Erro ao preparar VSL: {result.stderr[-200:] if result.stderr else ''}", "ERROR")
                     return None
-                self.log("VSL preparada (redimensionada)", "DEBUG")
+                self.log("VSL preparada (redimensionada, com áudio próprio)", "DEBUG")
                 
                 # PARTE 3: Extrair fim do vídeo (após vsl_end_time até o final)
                 part3_path = os.path.join(temp_dir, "part3.mp4")
@@ -3299,40 +3300,9 @@ class VSLEngine:
                         return None
                     self.log("Parte 3 extraída (após VSL)", "DEBUG")
                 
-                # Extrair áudio do trecho onde a VSL será inserida (para manter áudio original)
-                audio_segment_path = os.path.join(temp_dir, "audio_segment.aac")
-                cmd_audio = [
-                    "ffmpeg", "-y",
-                    "-ss", str(start_time_sec),
-                    "-t", str(vsl_duration),
-                    "-i", video_path,
-                    "-vn", "-acodec", "aac", "-b:a", "192k",
-                    audio_segment_path
-                ]
-                result = subprocess.run(cmd_audio, capture_output=True, text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-                
-                # Combinar VSL com áudio original
-                vsl_with_audio_path = os.path.join(temp_dir, "vsl_with_audio.mp4")
-                if result.returncode == 0 and os.path.exists(audio_segment_path):
-                    cmd_combine = [
-                        "ffmpeg", "-y",
-                        "-i", vsl_prepared_path,
-                        "-i", audio_segment_path,
-                        "-c:v", "copy",
-                        "-c:a", "aac",
-                        "-shortest",
-                        vsl_with_audio_path
-                    ]
-                    result = subprocess.run(cmd_combine, capture_output=True, text=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
-                    if result.returncode != 0:
-                        # Se falhar, usar VSL sem áudio
-                        vsl_with_audio_path = vsl_prepared_path
-                else:
-                    vsl_with_audio_path = vsl_prepared_path
-                
-                self.log("VSL com áudio preparada", "DEBUG")
+                # A VSL já tem seu próprio áudio, usar diretamente
+                vsl_with_audio_path = vsl_prepared_path
+                self.log("VSL com áudio próprio pronta", "DEBUG")
                 
                 # CONCATENAR: Criar arquivo de lista para concat
                 concat_list_path = os.path.join(temp_dir, "concat_list.txt")

@@ -6288,7 +6288,8 @@ class FinalSlideshowApp(ctk.CTk):
         tts_header = ctk.CTkFrame(section, fg_color="transparent")
         tts_header.pack(fill="x", padx=15, pady=(10, 5))
         
-        self.tts_expanded_var = ctk.BooleanVar(value=False)
+        # Sincronizar tts_expanded_var com o valor salvo de tts_enabled_var
+        self.tts_expanded_var = ctk.BooleanVar(value=self.tts_enabled_var.get())
         ctk.CTkCheckBox(
             tts_header, text="Gerar Áudio via TTS (Text-to-Speech)",
             variable=self.tts_expanded_var,
@@ -6343,6 +6344,11 @@ class FinalSlideshowApp(ctk.CTk):
             text="O áudio gerado substitui a narração do vídeo",
             text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
         ).pack(anchor="w", padx=10, pady=(0, 10))
+        
+        # Se TTS estava habilitado nas configurações salvas, expandir o painel
+        if self.tts_enabled_var.get():
+            self.tts_panel_frame.pack(fill="x", padx=15, pady=(0, 10))
+            self.toggle_tts_provider()
 
     def toggle_audio_backlog(self):
         """Mostra/oculta painel de backlog de áudios."""
@@ -6353,6 +6359,9 @@ class FinalSlideshowApp(ctk.CTk):
 
     def toggle_tts_panel(self):
         """Mostra/oculta painel TTS."""
+        # Sincronizar tts_enabled_var com o checkbox
+        self.tts_enabled_var.set(self.tts_expanded_var.get())
+        
         if self.tts_expanded_var.get():
             self.tts_panel_frame.pack(fill="x", padx=15, pady=(0, 10))
             self.toggle_tts_provider()

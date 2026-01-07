@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Motor de Animações Ken Burns v2.0
+Motor de Animações Ken Burns v2.1
 ==================================
-Aplica efeitos de movimento variados (Zoom, Pan, Rotation, Punch-in) em imagens para vídeo.
+Aplica efeitos de movimento variados (Zoom, Pan, Rotation) em imagens para vídeo.
 
-14 Efeitos Disponíveis:
+15 Efeitos Disponíveis:
 - A: pan_left_to_right
 - B: pan_right_to_left
 - C: pan_top_to_bottom
@@ -18,7 +18,8 @@ Aplica efeitos de movimento variados (Zoom, Pan, Rotation, Punch-in) em imagens 
 - K: pan_top_to_bottom_zoom_out
 - L: pan_bottom_to_top_zoom_out
 - M: rotation_light
-- N: punch_in
+- N: zoom_in (puro)
+- O: zoom_out (puro)
 """
 
 import cv2
@@ -30,7 +31,7 @@ from typing import List, Optional
 class KenBurnsEngine:
     """Motor para aplicar animações Ken Burns em imagens."""
 
-    # Mapeamento de letras para efeitos (A-N)
+    # Mapeamento de letras para efeitos (A-O)
     EFFECT_MAP = {
         "A": "pan_left_to_right",
         "B": "pan_right_to_left",
@@ -45,10 +46,11 @@ class KenBurnsEngine:
         "K": "pan_top_to_bottom_zoom_out",
         "L": "pan_bottom_to_top_zoom_out",
         "M": "rotation_light",
-        "N": "punch_in"
+        "N": "zoom_in",
+        "O": "zoom_out"
     }
 
-    # Todos os tipos de animação disponíveis (14 efeitos)
+    # Todos os tipos de animação disponíveis (15 efeitos)
     ANIMATION_TYPES = list(EFFECT_MAP.values())
 
     def __init__(self, log_callback=None):
@@ -589,38 +591,6 @@ class KenBurnsEngine:
 
         return frames
 
-    def apply_punch_in(self, img: np.ndarray, width: int, height: int,
-                       duration: float, fps: int, punch_scale: float = 1.25) -> List[np.ndarray]:
-        """
-        Aplica punch-in (zoom rápido central com desaceleração).
-        
-        Efeito: Zoom rápido no início, desacelera no final.
-        
-        Args:
-            punch_scale: Escala máxima do punch (padrão: 1.25)
-        """
-        img_base = self.smart_crop_16x9(img, width, height)
-        center = (width / 2.0, height / 2.0)
-        total_frames = int(duration * fps)
-        frames = []
-
-        for frame_num in range(total_frames):
-            t = frame_num / (total_frames - 1) if total_frames > 1 else 0
-            # Curva de ease-out (rápido no início, lento no final)
-            # Usando função quadrática invertida
-            eased_t = 1 - (1 - t) ** 2
-            
-            scale = 1.0 + (punch_scale - 1.0) * eased_t
-            M = cv2.getRotationMatrix2D(center, 0, scale)
-            frame = cv2.warpAffine(
-                img_base, M, (width, height),
-                flags=cv2.INTER_LANCZOS4,
-                borderMode=cv2.BORDER_REPLICATE
-            )
-            frames.append(frame)
-
-        return frames
-
     # =========================================================================
     # RENDERIZAÇÃO PRINCIPAL
     # =========================================================================
@@ -674,7 +644,6 @@ class KenBurnsEngine:
                 "pan_bottom_to_top_zoom_out": lambda: self.apply_pan_bottom_to_top_zoom_out(img, width, height, duration, fps),
                 # Especiais
                 "rotation_light": lambda: self.apply_rotation_light(img, width, height, duration, fps),
-                "punch_in": lambda: self.apply_punch_in(img, width, height, duration, fps),
             }
 
             if animation_type not in animation_methods:

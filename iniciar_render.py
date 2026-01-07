@@ -3845,8 +3845,8 @@ class FinalSlideshowApp(ctk.CTk):
         self.use_varied_animations_var = ctk.BooleanVar(value=self.config.get("use_varied_animations", True))
         self.pan_amount_var = ctk.DoubleVar(value=self.config.get("pan_amount", 0.2))
         
-        # Seleção de efeitos de animação (14 efeitos disponíveis)
-        # Mapeamento: A-N para os 14 efeitos Ken Burns
+        # Seleção de efeitos de animação (15 efeitos disponíveis)
+        # Mapeamento: A-O para os 15 efeitos Ken Burns
         self.EFFECT_NAMES = {
             "A": "Pan Esq→Dir",
             "B": "Pan Dir→Esq", 
@@ -3861,7 +3861,8 @@ class FinalSlideshowApp(ctk.CTk):
             "K": "Pan Cima→Baixo + Zoom Out",
             "L": "Pan Baixo→Cima + Zoom Out",
             "M": "Rotação Leve",
-            "N": "Punch-In"
+            "N": "Zoom In (puro)",
+            "O": "Zoom Out (puro)"
         }
         # Carregar efeitos habilitados do config (padrão: todos habilitados)
         default_effects = list(self.EFFECT_NAMES.keys())
@@ -4479,7 +4480,7 @@ class FinalSlideshowApp(ctk.CTk):
         
         # Label mostrando quantos efeitos estão selecionados
         self.effects_count_label = ctk.CTkLabel(
-            anim_frame, text=f"({sum(v.get() for v in self.effect_vars.values())}/14)",
+            anim_frame, text=f"({sum(v.get() for v in self.effect_vars.values())}/15)",
             text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
         )
         self.effects_count_label.pack(side="left", padx=(5, 0))
@@ -4847,7 +4848,7 @@ class FinalSlideshowApp(ctk.CTk):
     def update_effects_count(self):
         """Atualiza o contador de efeitos selecionados."""
         count = sum(v.get() for v in self.effect_vars.values())
-        self.effects_count_label.configure(text=f"({count}/14)")
+        self.effects_count_label.configure(text=f"({count}/15)")
         
         # Garantir mínimo de 2 efeitos
         if count < 2:
@@ -4872,8 +4873,8 @@ class FinalSlideshowApp(ctk.CTk):
             for letter in ["A", "B", "C", "D"]:
                 self.effect_vars[letter].set(True)
         elif preset == "zoom":
-            # Efeitos com zoom (E-L)
-            for letter in ["E", "F", "G", "H", "I", "J", "K", "L"]:
+            # Efeitos com zoom (E-L + N, O puros)
+            for letter in ["E", "F", "G", "H", "I", "J", "K", "L", "N", "O"]:
                 self.effect_vars[letter].set(True)
         
         self.update_effects_count()

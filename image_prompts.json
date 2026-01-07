@@ -1,0 +1,106 @@
+{
+  "description": "Prompts de imagem para diferentes canais/estilos",
+  "default_prompt": "spiritual_chosen",
+  "global_negative_prompt": "readable text, watermark, logo, signature, low resolution, blurry, cartoon, heavy CGI, oversharpen, excessive noise, extra fingers, deformed hands, deformed face, misaligned eyes, duplicated, artifacts, plastic skin, letters, words, writing, captions, labels, numbers, typography, font, subtitle, title, banner, UI elements",
+  "prompts": [
+    {
+      "id": "spiritual_chosen",
+      "name": "Espiritual - Chosen Ones",
+      "description": "Estilo cinematográfico fotorrealista com magia sutil - teal & amber",
+      "template": "Cinematic photorealistic scene, 35mm film texture with fine grain, filmic contrast, natural skin tones. Teal and petrol blue shadows, golden amber highlights and magical elements. Volumetric light with soft haze, glowing particles suspended in air, bokeh, lens reflections. Abstract mystical symbols (geometric mandalas, constellation patterns, luminous glyphs floating like dust). Central symmetric framing, clear subject in foreground, depth in background. Surreal subtle atmosphere - normal reality with one elegant impossible phenomenon",
+      "prefix": "",
+      "suffix": ", 35mm film grain, teal and amber color grade, volumetric lighting, shallow depth of field, cinematic composition, photoreal, high detail, masterpiece quality",
+      "negative_prompt": "readable text, watermark, logo, low resolution, blurry, cartoon, heavy CGI, oversharpen, excessive noise, extra fingers, deformed hands, deformed face, misaligned eyes, duplicated, artifacts, plastic skin, anime, sketch, drawing",
+      "style_modifiers": ["cinematic", "filmic", "volumetric", "ethereal"],
+      "quality_boost": "35mm film look, professional cinematography, natural lighting, photorealistic detail"
+    },
+    {
+      "id": "meditation",
+      "name": "Meditação & Paz",
+      "description": "Estilo sereno e calmo para conteúdo de meditação",
+      "template": "Peaceful meditation scene, serene atmosphere, soft pastel colors, zen garden aesthetic, calm water reflections, gentle light, minimalist composition, tranquil mood, spiritual harmony, high quality art, soothing ambiance",
+      "prefix": "",
+      "suffix": ", serene atmosphere, soft colors, spiritual harmony, peaceful, calming, photorealistic",
+      "negative_prompt": "text, letters, words, writing, captions, watermark, harsh lighting, chaotic, busy, cluttered, dark, scary, violent",
+      "style_modifiers": ["serene", "peaceful", "zen", "calming"],
+      "quality_boost": "professional photography, soft lighting, high resolution"
+    },
+    {
+      "id": "cosmic",
+      "name": "Cósmico & Universo",
+      "description": "Estilo espacial com galáxias e nebulosas",
+      "template": "Cosmic space scene, nebula colors, galaxy background, stars and planets, universe aesthetic, ethereal cosmic energy, deep space imagery, astronomical beauty, vibrant nebula colors, cinematic space art, NASA quality",
+      "prefix": "",
+      "suffix": ", galaxy, nebula, stars, infinite space, cosmic wonder, photorealistic, 8K",
+      "negative_prompt": "text, letters, words, writing, captions, watermark, cartoon, low quality, blurry, earth, buildings, people",
+      "style_modifiers": ["cosmic", "celestial", "astronomical", "nebular"],
+      "quality_boost": "NASA quality, Hubble telescope style, ultra high definition"
+    },
+    {
+      "id": "nature_mystic",
+      "name": "Natureza Mística",
+      "description": "Paisagens naturais com toque místico",
+      "template": "Mystical nature landscape, enchanted forest, magical atmosphere, ethereal fog, ancient trees, fantasy nature scene, bioluminescent elements, mystical creatures silhouette, golden hour lighting, dreamy aesthetic, fairy tale mood",
+      "prefix": "",
+      "suffix": ", enchanted forest, magical atmosphere, golden light, photorealistic, cinematic",
+      "negative_prompt": "text, letters, words, writing, captions, watermark, urban, city, buildings, cars, modern elements, people",
+      "style_modifiers": ["enchanted", "mystical", "magical", "ethereal"],
+      "quality_boost": "National Geographic quality, professional landscape photography"
+    },
+    {
+      "id": "angel_divine",
+      "name": "Anjos & Divino",
+      "description": "Imagens angelicais e celestiais",
+      "template": "Divine angelic scene, heavenly light, golden wings, celestial clouds, sacred imagery, ethereal beings, holy atmosphere, radiant glow, paradise aesthetic, spiritual elevation, majestic composition, renaissance art style",
+      "prefix": "",
+      "suffix": ", celestial light, golden wings, paradise, sacred, photorealistic, masterpiece",
+      "negative_prompt": "text, letters, words, writing, captions, watermark, dark, evil, demonic, scary, horror, ugly faces",
+      "style_modifiers": ["angelic", "divine", "celestial", "heavenly"],
+      "quality_boost": "renaissance masterpiece quality, divine lighting, ultra detailed"
+    },
+    {
+      "id": "dark_mystic",
+      "name": "Místico Sombrio",
+      "description": "Estilo dark com elementos místicos",
+      "template": "Dark mystical atmosphere, gothic aesthetic, moonlight scene, mysterious shadows, ancient symbols, occult imagery, deep purple and black tones, dramatic contrast, enigmatic mood, mystical darkness, noir style",
+      "prefix": "",
+      "suffix": ", gothic atmosphere, moonlight, shadows, ancient symbols, cinematic, photorealistic",
+      "negative_prompt": "text, letters, words, writing, captions, watermark, bright colors, cheerful, cartoon, anime, low quality",
+      "style_modifiers": ["gothic", "mysterious", "dark", "enigmatic"],
+      "quality_boost": "cinematic lighting, high contrast, professional photography"
+    },
+    {
+      "id": "motivation",
+      "name": "Motivacional",
+      "description": "Imagens inspiradoras e motivacionais",
+      "template": "Inspirational scene, sunrise over mountains, triumphant mood, powerful imagery, determination aesthetic, epic landscape, golden light rays, victorious atmosphere, motivational composition, strength and power, heroic perspective",
+      "prefix": "",
+      "suffix": ", victory, determination, sunrise, epic mountains, cinematic, photorealistic",
+      "negative_prompt": "text, letters, words, writing, captions, watermark, quotes, motivational text, sad, depressing, dark, gloomy",
+      "style_modifiers": ["inspirational", "triumphant", "epic", "powerful"],
+      "quality_boost": "National Geographic quality, golden hour lighting, epic composition"
+    },
+    {
+      "id": "wealth_abundance",
+      "name": "Riqueza & Abundância",
+      "description": "Estilo luxuoso para conteúdo de prosperidade",
+      "template": "Luxury abundance scene, golden elements, wealth aesthetic, opulent imagery, treasure and gold, prosperous atmosphere, rich colors, royal composition, abundance symbolism, manifestation energy, luxurious setting",
+      "prefix": "",
+      "suffix": ", gold, wealth, luxury, manifestation, photorealistic, high end",
+      "negative_prompt": "text, letters, words, writing, captions, watermark, poor, dirty, cheap, low quality, cartoon",
+      "style_modifiers": ["luxurious", "opulent", "golden", "prosperous"],
+      "quality_boost": "luxury magazine quality, professional product photography, rich colors"
+    },
+    {
+      "id": "custom",
+      "name": "Personalizado",
+      "description": "Prompt totalmente personalizado - edite os campos abaixo",
+      "template": "",
+      "prefix": "",
+      "suffix": ", high quality, photorealistic, 4K, detailed",
+      "negative_prompt": "text, letters, words, writing, captions, watermark, blurry, low quality",
+      "style_modifiers": [],
+      "quality_boost": "professional quality, sharp focus, high resolution"
+    }
+  ]
+}

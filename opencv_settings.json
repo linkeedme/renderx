@@ -1,0 +1,11 @@
+{
+  "audio_path": "C:/Users/Vinicius/Downloads/MATERIAL RENDER ESPITUALIDADE/audio curto.mp3",
+  "images_folder": "C:/Users/Vinicius/Downloads/MATERIAL RENDER ESPITUALIDADE/IMGS PAREA EDIT DE ESPIRITUALIDADE",
+  "output_folder": "C:/Users/Vinicius/Downloads/MATERIAL RENDER ESPITUALIDADE/SAIDA DO RENDER ESPITUALIDADE",
+  "resolution": "1080p",
+  "zoom_mode": "zoom_in",
+  "zoom_scale": 1.15,
+  "image_duration": 8.0,
+  "transition_duration": 1.0,
+  "threads": 12
+}

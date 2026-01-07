@@ -1,0 +1,26 @@
+{
+  "GERAL": {
+    "font_name": "Arial",
+    "font_size": 48,
+    "color_primary": "#FFFFFF",
+    "color_outline": "#000000",
+    "color_shadow": "#80000000",
+    "color_karaoke": "#ffffff",
+    "outline_size": 2,
+    "shadow_size": 2,
+    "use_karaoke": false,
+    "position": "5"
+  },
+  "PADRAO": {
+    "font_name": "AppleGothic",
+    "font_size": 50,
+    "color_primary": "#FFFFFF",
+    "color_outline": "#000000",
+    "color_shadow": "#80000000",
+    "color_karaoke": "#ffffff",
+    "outline_size": 2,
+    "shadow_size": 2,
+    "use_karaoke": false,
+    "position": "5"
+  }
+}

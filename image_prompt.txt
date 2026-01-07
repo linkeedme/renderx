@@ -1,0 +1,23 @@
+# Template de Prompt para Geração de Imagens
+# ==========================================
+# Este arquivo contém o prompt base usado para gerar imagens.
+# O texto do SRT será combinado com este prompt.
+#
+# Dicas:
+# - Mantenha o prompt consistente para manter estilo visual
+# - Use termos específicos para o estilo desejado
+# - Evite prompts muito longos (máximo 200 palavras)
+
+Spiritual atmosphere, divine light, ethereal glow, chosen ones theme,
+mystical and sacred imagery, high quality digital art,
+dramatic lighting with golden rays, soft particles floating,
+cinematic composition, ultra detailed, 4K resolution,
+consistent art style throughout, professional quality
+
+# Notas:
+# - Este prompt será combinado com o texto do SRT
+# - O sistema adicionará automaticamente parâmetros de qualidade
+# - Modifique conforme necessário para seu projeto
+
+
+

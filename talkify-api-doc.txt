@@ -1,0 +1,20 @@
+enviar audio:
+
+POST
+https://api.talkifydev.com/tts/jobs
+
+Header
+Authorization
+Bearer eyJhbGciOiJIUzI1NiJ9.eyJuYW1lIjoiTElOS0VFRCBDTyIsImVtYWlsIjoibGlua2VlZGNvQGdtYWlsLmNvbSIsInBpY3R1cmUiOiJodHRwczovL2xoMy5nb29nbGV1c2VyY29udGVudC5jb20vYS9BQ2c4b2NKNnpzekoxTzlSZURCS2dHbkR1dU9nTFJUQTlUOHFyMWloR1pjNUh4X0tWcF9rOFE9czk2LWMiLCJzdWIiOiIwODc4NTRmNS1lZDA2LTRlZDAtYTE2My1jNTBiMTY5MjUwN2MiLCJ1aWQiOiIwODc4NTRmNS1lZDA2LTRlZDAtYTE2My1jNTBiMTY5MjUwN2MiLCJpYXQiOjE3NjU5NDU0MzYsImV4cCI6MTc3MTEyOTQzNn0.ICd4h1VCCuNRDylMYKjK3Vmz8l_JkhWGG5UyjrUpdC4
+
+Body:
+{"audioName":"audio","audio":{"text":"TESTE TESTE TESTE","voiceId":"6225da68-4f93-446c-b509-4cf71dff7619","rate":1}}
+
+
+baixar audio
+Header
+Authorization
+Bearer eyJhbGciOiJIUzI1NiJ9.eyJuYW1lIjoiTElOS0VFRCBDTyIsImVtYWlsIjoibGlua2VlZGNvQGdtYWlsLmNvbSIsInBpY3R1cmUiOiJodHRwczovL2xoMy5nb29nbGV1c2VyY29udGVudC5jb20vYS9BQ2c4b2NKNnpzekoxTzlSZURCS2dHbkR1dU9nTFJUQTlUOHFyMWloR1pjNUh4X0tWcF9rOFE9czk2LWMiLCJzdWIiOiIwODc4NTRmNS1lZDA2LTRlZDAtYTE2My1jNTBiMTY5MjUwN2MiLCJ1aWQiOiIwODc4NTRmNS1lZDA2LTRlZDAtYTE2My1jNTBiMTY5MjUwN2MiLCJpYXQiOjE3NjU5NDU0MzYsImV4cCI6MTc3MTEyOTQzNn0.ICd4h1VCCuNRDylMYKjK3Vmz8l_JkhWGG5UyjrUpdC4
+
+GET
+https://api.talkifydev.com/tts/jobs/bb5285f3-98aa-4699-9f6b-2321123f8eb6 - esse id do job é recebido após o post da requisição. a api devolve o id do job para download

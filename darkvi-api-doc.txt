@@ -1,0 +1,169 @@
+Gerar áudio
+Cria um texto para conversão em áudio e inicia o processamento.
+
+POST
+https://darkvi.com/api/tts
+Autenticação
+O token deve estar associado a um usuário ativo.
+
+Header
+Authorization: Bearer <SEU_TOKEN_DE_API>
+Parâmetros
+Parâmetro	Tipo	Onde	Obrigatório	Descrição
+text	string	body	Sim	Texto a ser convertido em áudio. Limite: 80.000 caracteres.
+Ex: Olá, este é um teste...
+voice	string	body	Sim	ID da voz desejada. Deve existir e estar ativa.
+Ex: br-mario-v1
+title	string	body	Não	Título opcional para identificar o áudio.
+Ex: Meu primeiro áudio
+Exemplo de Requisição
+{
+  "text": "Olá, este é um teste de conversão de texto para fala.",
+  "voice": "br-mario-v1",
+  "title": "Meu primeiro áudio"
+}
+Respostas
+201 Created
+Texto aceito e encaminhado para processamento.
+
+{
+  "ok": true,
+  "message": "Texto criado e encaminhado para processamento.",
+  "data": {
+    "created": {
+      "id": "uuid",
+      "status": "PENDING"
+    }
+  }
+}
+
+
+
+Baixar áudio
+Retorna o MP3 gerado pelo TTS.
+
+GET
+https://darkvi.com/api/tts/audios/:id?name=Opcional
+Autenticação
+Header
+Authorization: Bearer <SEU_TOKEN_DE_API>
+Parâmetros
+Parâmetro	Tipo	Onde	Obrigatório	Descrição
+id	string (uuid)	path	Sim	ID do áudio/textspeech.
+Ex: 4cb014d7-0061-42e4-8c09
+name	string	query	Não	Nome opcional do arquivo no Content-Disposition.
+Ex: meu-audio
+Respostas
+200 OK (audio/mpeg)
+Binário MP3.
+
+404 Not Found
+Áudio não encontrado.
+
+{
+  "ok": false,
+  "error": true,
+  "code": "AUDIO_NOT_FOUND",
+  "message": "Áudio não encontrado."
+}
+
+
+
+Listar vozes
+Retorna a lista de vozes ativas disponíveis para TTS.
+
+GET
+https://darkvi.com/api/tts/voices
+Autenticação
+O token deve estar associado a um usuário ativo.
+
+Header
+Authorization: Bearer <SEU_TOKEN_DE_API>
+Respostas
+200 OK
+Lista de vozes ativas.
+
+[
+  {
+    "id": "br-mario-v1",
+    "name": "Mario (PT-BR)"
+  },
+  {
+    "id": "br-ana-v2",
+    "name": "Ana (PT-BR)"
+  }
+]
+401 Unauthorized
+Token ausente ou inválido.
+
+{
+  "ok": false,
+  "error": true,
+  "code": "AUTH_INVALID_TOKEN",
+  "message": "Token inválido."
+}
+404 Not Found
+Nenhuma voz encontrada.
+
+{
+  "ok": false,
+  "error": true,
+  "code": "VOICES_NOT_FOUND",
+  "message": "Nenhuma voz encontrada"
+}
+
+
+Consultar TTS
+Retorna os dados do texto/áudio gerado (textSpeech) pelo ID. Só permite acesso ao dono do áudio.
+
+GET
+https://darkvi.com/api/tts/:id
+Autenticação
+O token deve estar associado a um usuário ativo.
+
+Header
+Authorization: Bearer <SEU_TOKEN_DE_API>
+Parâmetros
+Parâmetro	Tipo	Onde	Obrigatório	Descrição
+id	string (uuid)	path	Sim	ID do registro textSpeech.
+Ex: 4cb014d7-0061-42e4-8c09
+Respostas
+200 OK
+Dados do áudio/texto encontrado.
+
+{
+  "id": "4cb014d7-0061-42e4-8c09",
+  "text": "Olá, isto é um teste...",
+  "status": "DONE",
+  "userId": "b2a8ec95-a83f-4551-985a-f5e47a830311",
+  "createdAt": "2025-11-23T12:00:00.000Z",
+  "updatedAt": "2025-11-23T12:02:10.000Z",
+  "titulo": "Meu teste"
+}
+401 Unauthorized
+Token ausente ou inválido.
+
+{
+  "ok": false,
+  "error": true,
+  "code": "AUTH_INVALID_TOKEN",
+  "message": "Token inválido."
+}
+403 Forbidden
+O áudio não pertence ao usuário autenticado.
+
+{
+  "ok": false,
+  "error": true,
+  "code": "FORBIDDEN",
+  "message": "Esse áudio não pertence a você."
+}
+404 Not Found
+ID não informado ou áudio não encontrado.
+
+{
+  "ok": false,
+  "error": true,
+  "code": "AUDIO_NOT_FOUND",
+  "message": "audio não encontrado para este id."
+}

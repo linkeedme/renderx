@@ -1,0 +1,62 @@
+# =============================================================================
+# RenderX - Arquivos Ignorados pelo Git
+# =============================================================================
+
+# Ambiente Virtual Python
+venv/
+.venv/
+env/
+.env/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# Arquivos de configuração local (contém chaves de API)
+final_settings.json
+whisk_keys.json
+
+# Pastas de trabalho (materiais e saídas)
+MATERIAL/
+SAIDA/
+IMAGENS ORACULO/
+AUDIOS_GERADOS/
+
+# Vídeos e mídia pesada (backlog)
+EFEITOS/BACKLOG_VIDEOS/
+EFEITOS/VSLs/
+
+# Arquivos temporários
+*.tmp
+*.temp
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Playwright
+.playwright_data/
+
+# Sistema de licenças (legado)
+_LEGADO_LICENCAS/
+
+# Arquivos de distribuição
+*.zip
+render3.2.zip
+RENDERX_v3.2_dist.zip
+
+# Arquivos de licença local
+license.dat
+.license
+

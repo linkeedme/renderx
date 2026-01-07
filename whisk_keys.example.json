@@ -1,0 +1,16 @@
+{
+  "description": "Arquivo de exemplo - Copie para whisk_keys.json e adicione seus tokens",
+  "tokens": [
+    {
+      "email": "seu_email@exemplo.com",
+      "token": "COLE_SEU_TOKEN_AQUI",
+      "enabled": true
+    }
+  ],
+  "settings": {
+    "cooldown_seconds": 60,
+    "request_delay": 1.0,
+    "parallel_workers": 0
+  }
+}
+

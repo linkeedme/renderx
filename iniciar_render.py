@@ -2685,22 +2685,35 @@ class FinalSlideshowEngine:
                 output_path = os.path.join(config["output_folder"], output_filename)
 
             # Com ou sem musica de fundo
-            if config.get("music_path") and os.path.exists(config["music_path"]):
+            music_path = config.get("music_path", "")
+            music_volume = config.get("music_volume", 0.2)
+            
+            # Debug: mostrar configuração de música
+            self.log(f"Música configurada: '{music_path}'", "DEBUG")
+            self.log(f"Volume música: {music_volume:.0%}", "DEBUG")
+            
+            if music_path and os.path.exists(music_path):
+                self.log(f"Mixando com música de fundo: {os.path.basename(music_path)}", "INFO")
                 video_final = os.path.join(temp_dir, "with_audio.mp4")
                 result = self.mix_audio(
                     current_video,
                     config["audio_path"],
-                    config["music_path"],
+                    music_path,
                     video_final,
-                    config.get("music_volume", 0.2),
+                    music_volume,
                     config
                 )
                 if result:
                     shutil.copy(video_final, output_path)
                 else:
                     # Fallback para audio simples
+                    self.log("Falha na mixagem, usando apenas narração", "WARN")
                     self.finalize_simple(current_video, config["audio_path"], output_path)
             else:
+                if music_path:
+                    self.log(f"Arquivo de música não encontrado: {music_path}", "WARN")
+                else:
+                    self.log("Nenhuma música de fundo configurada", "INFO")
                 self.finalize_simple(current_video, config["audio_path"], output_path)
 
             # Limpar temp
@@ -7297,11 +7310,17 @@ v2.0 (Versão Base)
 
     def build_config_for_job(self, job, images):
         """Constroi configuracao para um job especifico."""
+        music_path = self.music_var.get()
+        if music_path:
+            self.log(f"Config música: {os.path.basename(music_path)} (vol: {self.music_volume_var.get():.0%})", "DEBUG")
+        else:
+            self.log("Config música: Nenhuma música configurada", "DEBUG")
+        
         return {
             "audio_path": job.audio_path,
             "images_list": images,  # Lista de imagens pre-selecionadas
             "output_path": job.output_path,
-            "music_path": self.music_var.get(),
+            "music_path": music_path,
             "overlay_path": self.overlay_var.get(),
             "resolution": self.resolution_var.get(),
             "zoom_mode": self.zoom_mode_var.get(),

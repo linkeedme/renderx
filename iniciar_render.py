@@ -212,6 +212,8 @@ DEFAULT_CONFIG = {
     "transition_duration": 1.0,
     "images_per_video": 50,        # Imagens por video (modo lote)
     "fps": 24,
+    "video_bitrate": "4M",         # Bitrate do video (2M, 4M, 6M, 8M ou "auto")
+    "video_crf": 23,               # CRF para modo CPU (qualidade constante)
     # Paralelismo
     "parallel_videos": 2,          # Videos simultaneos (1-4)
     "threads_per_video": 6,        # Threads por video
@@ -462,6 +464,36 @@ class FinalSlideshowEngine:
         self.motion_shuffler = MotionShuffler(self.log)
         self.prompt_manager = PromptManager(str(SCRIPT_DIR), self.log)
         self.overlay_manager = OverlayManager(log_callback=self.log)
+
+    def get_encoder_args(self, config, use_gpu=None):
+        """Retorna os argumentos do encoder baseado na configuração de bitrate.
+        
+        Args:
+            config: Dicionário de configuração com 'video_bitrate'
+            use_gpu: Se None, usa self.check_gpu_available()
+        
+        Returns:
+            Lista de argumentos para o encoder FFmpeg
+        """
+        if use_gpu is None:
+            use_gpu = self.check_gpu_available()
+        
+        bitrate = config.get("video_bitrate", "4M")
+        crf = config.get("video_crf", 23)
+        
+        if use_gpu:
+            if bitrate == "auto":
+                # Modo CRF para GPU (usa -cq em vez de -b:v)
+                return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", str(crf)]
+            else:
+                return ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", bitrate]
+        else:
+            if bitrate == "auto":
+                # Modo CRF para CPU
+                return ["-c:v", "libx264", "-preset", "fast", "-crf", str(crf)]
+            else:
+                # Modo bitrate fixo para CPU (usa -b:v com maxrate/bufsize)
+                return ["-c:v", "libx264", "-preset", "fast", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{int(bitrate[:-1])*2}M"]
 
     def log(self, message, level="INFO"):
         """Envia mensagem para a fila de log (thread-safe)."""
@@ -768,10 +800,7 @@ class FinalSlideshowEngine:
             offset = max(0, current_duration - transition_duration)
 
             # Encoder args
-            if use_gpu:
-                encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-            else:
-                encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+            encoder_args = self.get_encoder_args(config, use_gpu)
 
             xfade_cmd = [
                 "ffmpeg", "-y",
@@ -859,10 +888,7 @@ class FinalSlideshowEngine:
 
         offset = max(0, duration_a - transition_duration)
 
-        if use_gpu:
-            encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-        else:
-            encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+        encoder_args = self.get_encoder_args({}, use_gpu)  # Config padrão para xfade
 
         cmd = [
             "ffmpeg", "-y",
@@ -1216,10 +1242,7 @@ class FinalSlideshowEngine:
         self.log(f"Aplicando overlay (opacidade: {opacity:.0%})...", "INFO")
 
         use_gpu = self.check_gpu_available()
-        if use_gpu:
-            encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-        else:
-            encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+        encoder_args = self.get_encoder_args({}, use_gpu)  # Config padrão para overlay
 
         # Obter duração do vídeo principal
         video_duration = self.get_video_duration(video_path)
@@ -1311,10 +1334,7 @@ class FinalSlideshowEngine:
                 self.log("Pasta de backlog de áudios não configurada ou não encontrada, usando música padrão", "WARN")
 
         use_gpu = self.check_gpu_available()
-        if use_gpu:
-            encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-        else:
-            encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+        encoder_args = self.get_encoder_args(config if config else {}, use_gpu)
 
         # Verificar se há VSL inserida - se sim, precisamos preservar o áudio da VSL
         vsl_start = config.get("vsl_inserted_start") if config else None
@@ -3151,41 +3171,14 @@ class FinalSlideshowEngine:
                 except Exception as e:
                     self.log(f"Erro ao processar legendas: {e}", "ERROR")
 
-            # ETAPA 4.1: INSERÇÃO VSL (APÓS LEGENDAS - para ficar na camada superior)
-            # A VSL é inserida DEPOIS das legendas para garantir que fique por cima
-            if use_vsl_config and vsl_path and vsl_start_sec is not None:
-                self.log("+================================================+", "INFO")
-                self.log("|  ETAPA 4.1: INSERÇÃO VSL (CAMADA SUPERIOR)     |", "ENGINE")
-                self.log("+================================================+", "INFO")
-                
-                try:
-                    use_gpu = self.check_gpu_available()
-                    vsl_engine = VSLEngine(self.log_queue)
-                    video_with_vsl = os.path.join(temp_dir, "with_vsl.mp4")
-                    
-                    result = vsl_engine.insert_vsl(
-                        current_video,
-                        vsl_path,
-                        vsl_start_sec,
-                        video_with_vsl,
-                        use_gpu
-                    )
-                    
-                    if result:
-                        current_video = video_with_vsl
-                        # Salvar dados da VSL no config para uso na mixagem de áudio
-                        # Isso permite que mix_audio preserve o áudio da VSL
-                        config["vsl_inserted_start"] = vsl_start_sec
-                        config["vsl_inserted_duration"] = vsl_duration
-                        self.log("VSL inserido com sucesso na camada superior (acima das legendas)!", "OK")
-                        self.log(f"Dados VSL salvos para mixagem: início={vsl_start_sec:.2f}s, duração={vsl_duration:.2f}s", "DEBUG")
-                    else:
-                        self.log("Falha ao inserir VSL. Continuando sem VSL.", "WARN")
-                        
-                except Exception as e:
-                    self.log(f"Erro ao inserir VSL: {e}", "ERROR")
-                    import traceback
-                    self.log(traceback.format_exc(), "ERROR")
+            # VSL será inserida na ETAPA 6 (última etapa, após vídeo 100% finalizado)
+            # Guardamos os dados aqui para usar depois
+            vsl_data_for_final = {
+                "use_vsl": use_vsl_config,
+                "vsl_path": vsl_path,
+                "vsl_start_sec": vsl_start_sec,
+                "vsl_duration": vsl_duration
+            } if use_vsl_config and vsl_path and vsl_start_sec is not None else None
 
             # ETAPA 4.5: Overlay (se configurado)
             if config.get("use_random_overlays", False) and config.get("overlay_folder"):
@@ -3260,6 +3253,52 @@ class FinalSlideshowEngine:
                 else:
                     self.log("Nenhuma música de fundo configurada", "INFO")
                 self.finalize_simple(current_video, config["audio_path"], output_path, config)
+
+            # ETAPA 6: INSERÇÃO VSL (ÚLTIMA ETAPA - após vídeo 100% finalizado)
+            # A VSL é inserida no vídeo FINAL, cortando e concatenando
+            # Isso garante que o áudio da VSL seja preservado corretamente
+            if vsl_data_for_final and vsl_data_for_final.get("use_vsl"):
+                self.log("+================================================+", "INFO")
+                self.log("|  ETAPA 6: INSERÇÃO VSL (ÚLTIMA ETAPA)          |", "ENGINE")
+                self.log("+================================================+", "INFO")
+                
+                vsl_path = vsl_data_for_final["vsl_path"]
+                vsl_start_sec = vsl_data_for_final["vsl_start_sec"]
+                vsl_duration = vsl_data_for_final["vsl_duration"]
+                
+                self.log(f"VSL: {os.path.basename(vsl_path)}", "INFO")
+                self.log(f"Ponto de inserção: {vsl_start_sec:.2f}s", "INFO")
+                self.log(f"Duração VSL: {vsl_duration:.2f}s", "INFO")
+                
+                try:
+                    use_gpu = self.check_gpu_available()
+                    vsl_engine = VSLEngine(self.log_queue)
+                    
+                    # Criar arquivo temporário para o vídeo com VSL
+                    video_with_vsl = os.path.join(temp_dir, "final_with_vsl.mp4")
+                    
+                    # Inserir VSL no vídeo finalizado
+                    result = vsl_engine.insert_vsl(
+                        output_path,  # Vídeo já finalizado (com áudio, legendas, etc)
+                        vsl_path,
+                        vsl_start_sec,
+                        video_with_vsl,
+                        use_gpu
+                    )
+                    
+                    if result and os.path.exists(video_with_vsl):
+                        # Substituir o vídeo final pelo vídeo com VSL
+                        shutil.copy(video_with_vsl, output_path)
+                        self.log("VSL inserido com sucesso no vídeo final!", "OK")
+                        self.log(f"Vídeo PAUSA em {vsl_start_sec:.2f}s -> VSL -> CONTINUA", "OK")
+                    else:
+                        self.log("Falha ao inserir VSL. Vídeo final mantido sem VSL.", "WARN")
+                        
+                except Exception as e:
+                    self.log(f"Erro ao inserir VSL: {e}", "ERROR")
+                    import traceback
+                    self.log(traceback.format_exc(), "ERROR")
+                    self.log("Vídeo final mantido sem VSL.", "WARN")
 
             # Limpar temp
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -4704,6 +4743,7 @@ class FinalSlideshowApp(ctk.CTk):
         self.duration_var = ctk.DoubleVar(value=self.config.get("image_duration", 8.0))
         self.transition_var = ctk.DoubleVar(value=self.config.get("transition_duration", 1.0))
         self.images_per_video_var = ctk.IntVar(value=self.config.get("images_per_video", 50))
+        self.video_bitrate_var = ctk.StringVar(value=self.config.get("video_bitrate", "4M"))
 
         # Paralelismo
         self.parallel_videos_var = ctk.IntVar(value=self.config.get("parallel_videos", 2))
@@ -4895,6 +4935,7 @@ class FinalSlideshowApp(ctk.CTk):
             "image_duration": self.duration_var.get(),
             "transition_duration": self.transition_var.get(),
             "images_per_video": int(self.images_per_video_var.get()),
+            "video_bitrate": self.video_bitrate_var.get(),
             # Paralelismo
             "parallel_videos": int(self.parallel_videos_var.get()),
             "threads_per_video": int(self.threads_per_video_var.get()),
@@ -5401,6 +5442,28 @@ class FinalSlideshowApp(ctk.CTk):
             res_frame, text="1080p", variable=self.resolution_var, value="1080p",
             fg_color=CORES["accent"], hover_color=CORES["accent_hover"]
         ).pack(side="left")
+
+        # Bitrate do vídeo
+        bitrate_frame = ctk.CTkFrame(common_frame, fg_color="transparent")
+        bitrate_frame.pack(fill="x", pady=(10, 0))
+        ctk.CTkLabel(bitrate_frame, text="Bitrate:", text_color=CORES["text"]).pack(side="left")
+        ctk.CTkComboBox(
+            bitrate_frame, 
+            variable=self.video_bitrate_var,
+            values=["2M", "4M", "6M", "8M", "auto"],
+            width=100,
+            fg_color=CORES["bg_input"],
+            border_color=CORES["accent"],
+            button_color=CORES["accent"],
+            button_hover_color=CORES["accent_hover"],
+            dropdown_fg_color=CORES["bg_input"]
+        ).pack(side="left", padx=(10, 5))
+        ctk.CTkLabel(
+            bitrate_frame, 
+            text="(2M=leve, 4M=equilibrado, 8M=alta qualidade, auto=CRF)",
+            text_color=CORES["text_dim"], 
+            font=ctk.CTkFont(size=10)
+        ).pack(side="left", padx=(5, 0))
 
         # Animações variadas (aplica a AMBOS os modos)
         anim_frame = ctk.CTkFrame(common_frame, fg_color="transparent")
@@ -8322,6 +8385,7 @@ v2.0 (Versão Base)
             "transition_duration": self.transition_var.get(),
             "threads": int(self.threads_per_video_var.get()),
             "fps": 24,
+            "video_bitrate": self.video_bitrate_var.get(),
             "music_volume": self.music_volume_var.get(),
             "overlay_opacity": self.overlay_opacity_var.get(),
             "use_fixed_images": True,  # Sempre usa imagens fixas no lote

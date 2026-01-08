@@ -134,7 +134,7 @@ class KenBurnsEngine:
             new_h = min(new_h, h)  # Garantir que não exceda a altura original
             y_offset = (h - new_h) // 2
             img_cropped = img[y_offset:y_offset + new_h, :]
-        
+
         # Verificar se o crop é válido
         crop_h, crop_w = img_cropped.shape[:2]
         if crop_h == 0 or crop_w == 0:

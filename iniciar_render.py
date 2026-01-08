@@ -1775,13 +1775,14 @@ class FinalSlideshowEngine:
     def loop_cell_to_duration(self, cell_video: str, audio_duration: float, config: dict, temp_dir: str) -> Optional[str]:
         """
         Faz loop da célula base até cobrir a duração do áudio.
+        OTIMIZADO: Tenta usar copy para loop mais rápido, re-encoding apenas se necessário.
         
         Args:
-            cell_video: Caminho do vídeo da célula
+            cell_video: Caminho do vídeo da célula (já com pêndulo e overlay aplicados)
             audio_duration: Duração do áudio em segundos
             config: Configuração do vídeo
             temp_dir: Diretório temporário
-            
+        
         Returns:
             Caminho do vídeo loopado ou None em caso de erro
         """
@@ -1796,22 +1797,63 @@ class FinalSlideshowEngine:
             
             if loops_needed <= 1:
                 # Não precisa fazer loop, apenas cortar no tamanho do áudio
+                if cell_duration > audio_duration:
+                    # Precisa cortar
+                    trimmed_video = os.path.join(temp_dir, "trimmed_cell.mp4")
+                    cmd_trim = [
+                        "ffmpeg", "-y",
+                        "-i", cell_video,
+                        "-t", str(audio_duration),
+                        "-c", "copy",
+                        trimmed_video
+                    ]
+                    result = subprocess.run(
+                        cmd_trim,
+                        capture_output=True,
+                        text=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                    )
+                    if result.returncode == 0 and os.path.exists(trimmed_video):
+                        return trimmed_video
                 return cell_video
             
             # Criar lista de concat para loop
             loop_list = os.path.join(temp_dir, "loop_list.txt")
             with open(loop_list, "w", encoding="utf-8") as f:
                 for _ in range(loops_needed):
-                    safe_path = cell_video.replace("\\", "/").replace("'", "'\\''")
+                    safe_path = os.path.abspath(cell_video).replace("\\", "/").replace("'", "'\\''")
                     f.write(f"file '{safe_path}'\n")
             
             looped_video = os.path.join(temp_dir, "looped_video.mp4")
             
-            # FFmpeg concat com corte no tamanho do áudio
+            # PRIMEIRO: Tentar loop com copy (muito mais rápido)
+            self.log(f"Tentando loop com copy ({loops_needed}x)...", "INFO")
+            cmd_copy = [
+                "ffmpeg", "-y",
+                "-f", "concat", "-safe", "0",
+                "-i", loop_list,
+                "-c", "copy",
+                "-t", str(audio_duration),
+                looped_video
+            ]
+            
+            result = subprocess.run(
+                cmd_copy,
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+            
+            if result.returncode == 0 and os.path.exists(looped_video):
+                self.log("Loop concluído com copy (rápido)!", "OK")
+                return looped_video
+            
+            # FALLBACK: Loop com re-encoding (mais lento, mas garantido)
+            self.log("Copy falhou, usando re-encoding para loop...", "WARN")
             use_gpu = self.check_gpu_available()
             encoder_args = self.get_encoder_args(config, use_gpu)
             
-            cmd = [
+            cmd_reenc = [
                 "ffmpeg", "-y",
                 "-f", "concat", "-safe", "0",
                 "-i", loop_list,
@@ -1821,10 +1863,8 @@ class FinalSlideshowEngine:
                 looped_video
             ]
             
-            self.log(f"Fazendo loop do vídeo ({loops_needed}x)...", "INFO")
-            
             result = subprocess.run(
-                cmd,
+                cmd_reenc,
                 capture_output=True,
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
@@ -1834,7 +1874,7 @@ class FinalSlideshowEngine:
                 self.log(f"Erro no loop: {result.stderr[-300:] if result.stderr else ''}", "ERROR")
                 return None
             
-            self.log("Loop concluído!", "OK")
+            self.log("Loop concluído com re-encoding!", "OK")
             return looped_video
             
         except Exception as e:

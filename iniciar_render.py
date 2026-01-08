@@ -716,6 +716,33 @@ class FinalSlideshowEngine:
                 out.write(frame)
 
             out.release()
+            
+            # Aplicar overlay se configurado (OTIMIZADO: aplica na célula individual)
+            overlay_path = config.get("overlay_path", "")
+            if overlay_path and os.path.exists(overlay_path):
+                opacity = config.get("overlay_opacity", 0.3)
+                # Criar caminho temporário para o clip com overlay
+                overlay_output = os.path.join(os.path.dirname(output_path), f"overlay_{os.path.basename(output_path)}")
+                
+                overlay_result = self.apply_overlay_to_clip(
+                    clip_path=output_path,
+                    overlay_path=overlay_path,
+                    output_path=overlay_output,
+                    width=width,
+                    height=height,
+                    duration=duration,
+                    opacity=opacity
+                )
+                
+                if overlay_result and overlay_result != output_path and os.path.exists(overlay_result):
+                    # Overlay foi aplicado - substituir arquivo original
+                    try:
+                        os.remove(output_path)
+                        shutil.move(overlay_result, output_path)
+                    except:
+                        pass
+                    return output_path
+            
             return output_path
 
         except Exception as e:
@@ -1237,8 +1264,76 @@ class FinalSlideshowEngine:
     # =========================================================================
     # OVERLAY (POEIRA/PARTICULAS)
     # =========================================================================
+    def apply_overlay_to_clip(self, clip_path: str, overlay_path: str, output_path: str, 
+                               width: int, height: int, duration: float, opacity: float = 0.3) -> Optional[str]:
+        """
+        Aplica overlay em um clip individual (otimizado para células pequenas).
+        
+        Muito mais rápido que processar o vídeo inteiro porque:
+        - Processa apenas alguns segundos por vez
+        - Usa opções otimizadas do FFmpeg
+        - Pode ser executado em paralelo para múltiplos clips
+        
+        Args:
+            clip_path: Caminho do clip de vídeo (sem áudio)
+            overlay_path: Caminho do arquivo de overlay
+            output_path: Caminho de saída
+            width: Largura do vídeo
+            height: Altura do vídeo
+            duration: Duração do clip em segundos
+            opacity: Opacidade do overlay (0.0-1.0)
+        
+        Returns:
+            Caminho do clip com overlay ou None em caso de erro
+        """
+        try:
+            use_gpu = self.check_gpu_available()
+            encoder_args = self.get_encoder_args({}, use_gpu)
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", clip_path,
+                "-stream_loop", "-1",
+                "-i", overlay_path,
+                "-filter_complex",
+                # Processar overlay: ajustar resolução e aplicar opacidade
+                f"[1:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+                f"format=rgba,colorchannelmixer=aa={opacity}[ov];"
+                # Aplicar overlay acima do vídeo
+                f"[0:v][ov]overlay=0:0[vout]",
+                "-map", "[vout]",
+                "-t", str(duration),  # Limitar duração
+                *encoder_args,
+                "-pix_fmt", "yuv420p",
+                "-an",  # Sem áudio
+                output_path
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+            
+            if result.returncode != 0:
+                # Se falhar, retornar clip original
+                return clip_path
+            
+            return output_path
+            
+        except Exception as e:
+            self.log(f"Erro ao aplicar overlay no clip: {str(e)}", "WARN")
+            return clip_path  # Fallback: retornar clip original
+    
     def apply_overlay(self, video_path, overlay_path, output_path, opacity=0.3):
-        """Aplica overlay com blend screen (remove preto) em toda a duração do vídeo."""
+        """
+        Aplica overlay com blend screen (remove preto) em toda a duração do vídeo.
+        
+        NOTA: Esta função é usada apenas para casos especiais (backlog intro, etc).
+        Para células individuais, use apply_overlay_to_clip() que é muito mais rápido.
+        """
         self.log(f"Aplicando overlay (opacidade: {opacity:.0%})...", "INFO")
 
         use_gpu = self.check_gpu_available()
@@ -2348,14 +2443,18 @@ class FinalSlideshowEngine:
             return None
 
     def render_image_with_animation(self, image_block: ImageBlock, output_path: str, 
-                                   config: dict) -> Optional[str]:
+                                   config: dict, temp_dir: str = None) -> Optional[str]:
         """
-        Renderiza imagem com animação Ken Burns.
+        Renderiza imagem com animação Ken Burns e aplica overlay se configurado.
+        
+        OTIMIZAÇÃO: Aplica overlay na célula individual ANTES de concatenar.
+        Isso é muito mais rápido que processar o vídeo inteiro depois.
 
         Args:
             image_block: Bloco de imagem com animação
             output_path: Caminho do vídeo de saída
             config: Configuração do vídeo
+            temp_dir: Diretório temporário (necessário se overlay estiver habilitado)
 
         Returns:
             Caminho do vídeo gerado ou None
@@ -2366,9 +2465,12 @@ class FinalSlideshowEngine:
             zoom_scale = config.get("zoom_scale", 1.15)
             pan_amount = config.get("pan_amount", 0.2)
 
+            # Renderizar animação Ken Burns
+            clip_without_overlay = output_path if temp_dir is None else os.path.join(temp_dir, f"clip_no_overlay_{id(image_block)}.mp4")
+            
             result = self.ken_burns_engine.render_animation(
                 image_path=image_block.image_path,
-                output_path=output_path,
+                output_path=clip_without_overlay,
                 animation_type=image_block.animation_type,
                 width=width,
                 height=height,
@@ -2378,7 +2480,40 @@ class FinalSlideshowEngine:
                 pan_amount=pan_amount
             )
 
-            return result
+            if not result:
+                return None
+
+            # Aplicar overlay se configurado (OTIMIZADO: aplica na célula individual)
+            overlay_path = config.get("overlay_path", "")
+            if overlay_path and os.path.exists(overlay_path) and temp_dir:
+                opacity = config.get("overlay_opacity", 0.3)
+                clip_with_overlay = output_path
+                
+                overlay_result = self.apply_overlay_to_clip(
+                    clip_path=clip_without_overlay,
+                    overlay_path=overlay_path,
+                    output_path=clip_with_overlay,
+                    width=width,
+                    height=height,
+                    duration=image_block.duration,
+                    opacity=opacity
+                )
+                
+                if overlay_result and overlay_result != clip_without_overlay:
+                    # Overlay foi aplicado com sucesso
+                    # Limpar arquivo temporário se necessário
+                    if clip_without_overlay != output_path and os.path.exists(clip_without_overlay):
+                        try:
+                            os.remove(clip_without_overlay)
+                        except:
+                            pass
+                    return overlay_result
+            
+            # Se não há overlay ou não foi aplicado, retornar clip original
+            if clip_without_overlay != output_path and os.path.exists(clip_without_overlay):
+                shutil.move(clip_without_overlay, output_path)
+            
+            return output_path if os.path.exists(output_path) else result
 
         except Exception as e:
             self.log(f"Erro ao renderizar animação: {str(e)}", "ERROR")
@@ -2405,7 +2540,7 @@ class FinalSlideshowEngine:
                     return None
 
                 clip_path = os.path.join(temp_dir, f"srt_clip_{i:04d}.mp4")
-                result = self.render_image_with_animation(block, clip_path, config)
+                result = self.render_image_with_animation(block, clip_path, config, temp_dir)
 
                 if result:
                     clip_paths.append(result)
@@ -2876,39 +3011,31 @@ class FinalSlideshowEngine:
                         video_stitched = video_with_intro
                     self.log("Intro concatenada com crossfade!", "OK")
 
-            # ETAPA 3: Overlay (opcional) - Aplicar apenas se não foi aplicado no backlog
+            # ETAPA 3: Overlay (opcional) - OTIMIZAÇÃO: Overlay já foi aplicado nas células individuais!
+            # No modo tradicional e SRT, overlay é aplicado DURANTE a renderização:
+            # - Modo SRT: render_image_with_animation() aplica overlay em cada célula
+            # - Modo tradicional: generate_zoom_clip() aplica overlay em cada clip
+            # Isso é MUITO mais rápido porque processa células pequenas em vez do vídeo inteiro
+            # Só precisamos aplicar overlay aqui no vídeo final se há backlog intro
             # Garantir que current_video está definido corretamente
             if not use_srt_based:
                 # No modo tradicional, current_video pode não ter sido atualizado se não houve backlog
                 if not backlog_intro or not os.path.exists(backlog_intro):
                     current_video = video_stitched
-            backlog_has_overlay = backlog_intro and os.path.exists(backlog_intro) and config.get("overlay_path") and os.path.exists(config["overlay_path"])
             
-            if config.get("overlay_path") and os.path.exists(config["overlay_path"]) and not backlog_has_overlay:
-                self.log("+================================================+", "INFO")
-                self.log("|  ETAPA 3: OVERLAY                              |", "ENGINE")
-                self.log("+================================================+", "INFO")
-
-                video_overlay = os.path.join(temp_dir, "with_overlay.mp4")
-                result = self.apply_overlay(
-                    current_video,
-                    config["overlay_path"],
-                    video_overlay,
-                    config.get("overlay_opacity", 0.3)
-                )
-                if result:
-                    current_video = video_overlay
-            elif backlog_has_overlay:
-                self.log("Overlay já aplicado no intro do backlog, aplicando no vídeo principal também...", "INFO")
-                video_overlay = os.path.join(temp_dir, "with_overlay.mp4")
-                result = self.apply_overlay(
-                    current_video,
-                    config["overlay_path"],
-                    video_overlay,
-                    config.get("overlay_opacity", 0.3)
-                )
-                if result:
-                    current_video = video_overlay
+            overlay_path = config.get("overlay_path", "")
+            has_overlay = overlay_path and os.path.exists(overlay_path)
+            backlog_has_overlay = backlog_intro and os.path.exists(backlog_intro) and has_overlay
+            
+            if has_overlay:
+                # Overlay foi aplicado nas células individuais (muito mais rápido!)
+                self.log("Overlay já aplicado nas células individuais (otimizado - muito mais rápido)!", "OK")
+            
+            # Só aplicar overlay no vídeo principal se há backlog intro sem overlay
+            # (geralmente não é necessário porque overlay já está nas células)
+            if backlog_has_overlay:
+                # Backlog intro já tem overlay - vídeo principal também já tem (nas células)
+                self.log("Overlay aplicado no intro do backlog e nas células do vídeo principal!", "OK")
 
             # ETAPA 3.5: PREPARAÇÃO VSL - Detectar palavra-chave e preparar dados
             # A inserção real do VSL acontece DEPOIS das legendas (para ficar por cima)

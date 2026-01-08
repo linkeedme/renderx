@@ -1450,10 +1450,7 @@ class FinalSlideshowEngine:
         self.log("Finalizando video (adicionando audio)...", "INFO")
 
         use_gpu = self.check_gpu_available()
-        if use_gpu:
-            encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-        else:
-            encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+        encoder_args = self.get_encoder_args(config if config else {}, use_gpu)
 
         # Verificar se há VSL inserida
         vsl_start = config.get("vsl_inserted_start") if config else None
@@ -1747,14 +1744,8 @@ class FinalSlideshowEngine:
             cmd.extend(["-map", "[vout]"])
             
             # Encoder
-            if use_gpu:
-                cmd.extend([
-                    "-c:v", "h264_nvenc",
-                    "-preset", "p4",
-                    "-b:v", "8M"
-                ])
-            else:
-                cmd.extend(["-c:v", "libx264", "-preset", "fast", "-crf", "23"])
+            encoder_args = self.get_encoder_args(config, use_gpu)
+            cmd.extend(encoder_args)
             
             cmd.extend([
                 "-t", str(cell_duration),
@@ -1818,10 +1809,7 @@ class FinalSlideshowEngine:
             
             # FFmpeg concat com corte no tamanho do áudio
             use_gpu = self.check_gpu_available()
-            if use_gpu:
-                encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-            else:
-                encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+            encoder_args = self.get_encoder_args(config, use_gpu)
             
             cmd = [
                 "ffmpeg", "-y",
@@ -1996,10 +1984,7 @@ class FinalSlideshowEngine:
 
         # FFmpeg concat com corte no tamanho do audio
         use_gpu = self.check_gpu_available()
-        if use_gpu:
-            encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-        else:
-            encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+        encoder_args = self.get_encoder_args(config, use_gpu)
 
         cmd = [
             "ffmpeg", "-y",
@@ -2423,10 +2408,7 @@ class FinalSlideshowEngine:
 
             # Usar FFmpeg concat demuxer (hard cut)
             use_gpu = self.check_gpu_available()
-            if use_gpu:
-                encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-            else:
-                encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+            encoder_args = self.get_encoder_args({}, use_gpu)  # Config padrão para concat
 
             cmd = [
                 "ffmpeg", "-y",
@@ -2789,10 +2771,7 @@ class FinalSlideshowEngine:
                 transition_dur = config.get("backlog_transition_duration", 0.5)
                 xfade_offset = max(0, intro_duration - transition_dur)
                 
-                if use_gpu:
-                    encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-                else:
-                    encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+                encoder_args = self.get_encoder_args(config, use_gpu)
                 
                 # Tentar usar xfade para transição suave
                 filter_complex = (
@@ -2825,11 +2804,12 @@ class FinalSlideshowEngine:
                 if result.returncode != 0:
                     # Fallback: concat simples sem crossfade
                     self.log("Erro no crossfade intro, tentando concatenação simples...", "WARN")
+                    fallback_encoder = self.get_encoder_args(config, use_gpu=False)
                     cmd_simple = [
                         "ffmpeg", "-y",
                         "-f", "concat", "-safe", "0",
                         "-i", concat_list_path,
-                        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    ] + fallback_encoder + [
                         "-c:a", "aac", "-b:a", "192k",
                         "-pix_fmt", "yuv420p",
                         video_with_intro
@@ -3696,10 +3676,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         # Escape do path para Windows
         safe_ass = ass_path.replace("\\", "/").replace(":", "\\:")
 
-        if use_gpu:
-            encoder = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-        else:
-            encoder = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+        encoder = self.get_encoder_args({}, use_gpu)  # Config padrão para legendas
 
         cmd = [
             "ffmpeg", "-y",
@@ -3842,10 +3819,7 @@ class VSLEngine:
             self.log(f"Resolucao do video base: {base_width}x{base_height}", "INFO")
 
             # Configurar encoder
-            if use_gpu:
-                encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-            else:
-                encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+            encoder_args = self.get_encoder_args({}, use_gpu)  # Config padrão para VSL
 
             # Criar diretório temporário
             temp_dir = tempfile.mkdtemp(prefix="vsl_insert_")
@@ -4511,10 +4485,7 @@ class BacklogVideoEngine:
                     video_filter += f",fade=t=out:st={fade_start}:d={fade_out_duration}:alpha=1"
                 
                 # Configurar encoder
-                if use_gpu:
-                    encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "8M"]
-                else:
-                    encoder_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+                encoder_args = self.get_encoder_args({}, use_gpu)  # Config padrão para backlog
                 
                 # Verificar se vídeo tem áudio
                 cmd_check_audio = [

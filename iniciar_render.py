@@ -3046,14 +3046,29 @@ class FinalSlideshowEngine:
                             self.log("Arquivo SRT não encontrado!", "WARN")
                     else:  # assemblyai
                         api_key = config.get("assemblyai_key", "")
-                        if api_key:
-                            use_karaoke = config.get("sub_options", {}).get("use_karaoke", True)
-                            events, transcript, words = subtitle_engine.generate_with_assemblyai(
-                                audio_path, api_key, use_karaoke, return_full_data=True
-                            )
-                            self.log(f"Transcrição AssemblyAI concluída: {len(events)} legendas", "INFO")
+                        # Validar API key antes de usar
+                        if not api_key or not api_key.strip():
+                            self.log("Chave API AssemblyAI não configurada ou vazia!", "ERROR")
+                            self.log("Configure a chave API AssemblyAI nas configurações de legendas", "WARN")
                         else:
-                            self.log("Chave API AssemblyAI não configurada!", "WARN")
+                            # Verificar se a API key parece válida (AssemblyAI keys geralmente têm 32+ caracteres)
+                            if len(api_key.strip()) < 20:
+                                self.log(f"AVISO: API key AssemblyAI parece inválida (muito curta: {len(api_key.strip())} caracteres)", "WARN")
+                            
+                            use_karaoke = config.get("sub_options", {}).get("use_karaoke", True)
+                            try:
+                                events, transcript, words = subtitle_engine.generate_with_assemblyai(
+                                    audio_path, api_key.strip(), use_karaoke, return_full_data=True
+                                )
+                                self.log(f"Transcrição AssemblyAI concluída: {len(events)} legendas", "INFO")
+                            except Exception as e:
+                                error_msg = str(e)
+                                if "Invalid API key" in error_msg or "401" in error_msg or "Unauthorized" in error_msg:
+                                    self.log("ERRO: Chave API AssemblyAI inválida ou expirada!", "ERROR")
+                                    self.log("Verifique se a chave API está correta e ativa em https://www.assemblyai.com/", "WARN")
+                                else:
+                                    self.log(f"Erro ao gerar legendas via AssemblyAI: {error_msg}", "ERROR")
+                                raise  # Re-raise para ser capturado pelo except externo
                     
                     if events:
                         if subtitle_mode == "full":
@@ -4078,21 +4093,61 @@ class SubtitleEngine:
         """
         try:
             import assemblyai as aai
+            
+            # Validar API key antes de configurar
+            if not api_key or not api_key.strip():
+                raise ValueError("API key do AssemblyAI não fornecida ou vazia")
+            
+            # Limpar espaços da API key
+            api_key = api_key.strip()
+            
+            # Verificar se parece válida (AssemblyAI keys geralmente têm 32+ caracteres)
+            if len(api_key) < 20:
+                self.log(f"AVISO: API key parece muito curta ({len(api_key)} caracteres). Verifique se está correta.", "WARN")
+            
             aai.settings.api_key = api_key
 
             self.log("Iniciando transcricao AssemblyAI...", "INFO")
+            
+            # Verificar se o arquivo de áudio existe
+            if not os.path.exists(audio_path):
+                raise FileNotFoundError(f"Arquivo de áudio não encontrado: {audio_path}")
 
             config = aai.TranscriptionConfig(language_detection=True)
             transcriber = aai.Transcriber()
             transcript = transcriber.transcribe(audio_path, config=config)
 
             if transcript.status == aai.TranscriptStatus.error:
-                raise Exception(f"Erro AssemblyAI: {transcript.error}")
+                error_msg = transcript.error or "Erro desconhecido"
+                # Melhorar mensagem de erro para API key inválida
+                if "401" in str(error_msg) or "Unauthorized" in str(error_msg) or "Invalid API key" in str(error_msg):
+                    raise Exception(f"API key AssemblyAI inválida ou expirada. Verifique sua chave em https://www.assemblyai.com/")
+                raise Exception(f"Erro AssemblyAI: {error_msg}")
 
             if not transcript.words:
                 raise Exception("Nenhuma palavra detectada no audio")
 
             self.log(f"Transcricao concluida: {len(transcript.words)} palavras", "OK")
+            
+        except Exception as e:
+            error_msg = str(e)
+            error_lower = error_msg.lower()
+            
+            # Detectar erros específicos de API key
+            if "invalid api key" in error_lower or "401" in error_msg or "unauthorized" in error_lower:
+                self.log("ERRO: API key AssemblyAI inválida ou expirada!", "ERROR")
+                self.log("Verifique se a chave API está correta e ativa em https://www.assemblyai.com/", "WARN")
+                self.log("Para obter uma nova chave API, acesse: https://www.assemblyai.com/app/account", "INFO")
+                raise Exception("API key AssemblyAI inválida ou expirada. Verifique sua chave em https://www.assemblyai.com/")
+            
+            # Detectar outros erros comuns
+            if "file not found" in error_lower or "no such file" in error_lower:
+                self.log(f"ERRO: Arquivo de áudio não encontrado: {audio_path}", "ERROR")
+                raise
+            
+            # Re-raise outros erros com mensagem melhorada
+            self.log(f"Erro na transcrição AssemblyAI: {error_msg}", "ERROR")
+            raise
 
             # Agrupar palavras em segmentos (4 palavras por linha)
             events = []
@@ -4129,6 +4184,25 @@ class SubtitleEngine:
 
         except ImportError:
             raise Exception("Biblioteca 'assemblyai' nao instalada. Execute: pip install assemblyai")
+        except Exception as e:
+            error_msg = str(e)
+            error_lower = error_msg.lower()
+            
+            # Detectar erros específicos de API key
+            if "invalid api key" in error_lower or "401" in error_msg or "unauthorized" in error_lower:
+                self.log("ERRO: API key AssemblyAI inválida ou expirada!", "ERROR")
+                self.log("Verifique se a chave API está correta e ativa em https://www.assemblyai.com/", "WARN")
+                self.log("Para obter uma nova chave API, acesse: https://www.assemblyai.com/app/account", "INFO")
+                raise Exception("API key AssemblyAI inválida ou expirada. Verifique sua chave em https://www.assemblyai.com/")
+            
+            # Detectar outros erros comuns
+            if "file not found" in error_lower or "no such file" in error_lower:
+                self.log(f"ERRO: Arquivo de áudio não encontrado: {audio_path}", "ERROR")
+                raise
+            
+            # Re-raise outros erros com mensagem melhorada
+            self.log(f"Erro na transcrição AssemblyAI: {error_msg}", "ERROR")
+            raise
 
     def ms_to_ass_time(self, ms):
         """Converte milissegundos para formato ASS (H:MM:SS.CC)."""

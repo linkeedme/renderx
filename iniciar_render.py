@@ -200,6 +200,43 @@ CORES = {
 SCRIPT_DIR = Path(__file__).parent.absolute()
 CONFIG_FILE = str(SCRIPT_DIR / "final_settings.json")
 SUBTITLE_PRESETS_FILE = str(SCRIPT_DIR / "subtitle_presets.json")
+ASSEMBLYAI_KEYS_FILE = SCRIPT_DIR / "keys_assembly.json"
+
+def load_assemblyai_keys():
+    """
+    Carrega lista de API keys do AssemblyAI do arquivo keys_assembly.json.
+    
+    Returns:
+        Lista de keys válidas (não vazias)
+    """
+    keys = []
+    if not ASSEMBLYAI_KEYS_FILE.exists():
+        # Criar arquivo padrão se não existir
+        default_data = {
+            "keys": [""],
+            "notes": "Adicione suas API keys do AssemblyAI aqui, uma por linha. O sistema tentará usar cada uma até encontrar uma que funcione."
+        }
+        try:
+            with open(ASSEMBLYAI_KEYS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(default_data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+        return keys
+    
+    try:
+        with open(ASSEMBLYAI_KEYS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            keys_list = data.get("keys", [])
+            # Filtrar keys vazias e limpar espaços
+            keys = [key.strip() for key in keys_list if key and key.strip()]
+    except Exception:
+        pass
+    
+    return keys
+
+def get_assemblyai_keys_count():
+    """Retorna o número de keys disponíveis no arquivo."""
+    return len(load_assemblyai_keys())
 
 DEFAULT_CONFIG = {
     # Modo Lote - Pastas principais
@@ -2281,15 +2318,17 @@ class FinalSlideshowEngine:
 
         elif srt_source == "assemblyai":
             audio_path = config.get("audio_path", "")
-            api_key = config.get("assemblyai_key", "")
-            if audio_path and api_key:
+            # Usar sistema de fallback com múltiplas keys do arquivo
+            # api_key não é mais necessária (será None para usar keys do arquivo)
+            if audio_path:
                 try:
-                    srt_blocks = self.srt_generator.generate_srt_from_assemblyai(audio_path, api_key)
+                    # Passar None para usar keys do arquivo keys_assembly.json
+                    srt_blocks = self.srt_generator.generate_srt_from_assemblyai(audio_path, None)
                 except Exception as e:
                     self.log(f"Erro ao gerar SRT via AssemblyAI: {str(e)}", "ERROR")
                     return []
             else:
-                self.log("Audio path ou AssemblyAI key não configurados", "ERROR")
+                self.log("Audio path não configurado", "ERROR")
                 return []
 
         elif srt_source == "darkvi":
@@ -3037,6 +3076,9 @@ class FinalSlideshowEngine:
                 try:
                     # Obter eventos de legenda
                     events = []
+                    transcript = None
+                    words = None
+                    
                     if config.get("subtitle_method") == "srt":
                         srt_path = config.get("srt_path", "")
                         if srt_path and os.path.exists(srt_path):
@@ -3045,30 +3087,54 @@ class FinalSlideshowEngine:
                         else:
                             self.log("Arquivo SRT não encontrado!", "WARN")
                     else:  # assemblyai
+                        # Usar sistema de fallback com múltiplas keys do arquivo keys_assembly.json
+                        # A key da interface é opcional (será tentada primeiro se fornecida)
                         api_key = config.get("assemblyai_key", "")
-                        # Validar API key antes de usar
-                        if not api_key or not api_key.strip():
-                            self.log("Chave API AssemblyAI não configurada ou vazia!", "ERROR")
-                            self.log("Configure a chave API AssemblyAI nas configurações de legendas", "WARN")
+                        api_key = api_key.strip() if api_key else None
+                        
+                        # Verificar quantas keys estão disponíveis
+                        keys_count = get_assemblyai_keys_count()
+                        if keys_count > 0:
+                            self.log(f"Usando sistema de fallback: {keys_count} key(s) disponível(eis) no arquivo keys_assembly.json", "INFO")
                         else:
-                            # Verificar se a API key parece válida (AssemblyAI keys geralmente têm 32+ caracteres)
-                            if len(api_key.strip()) < 20:
-                                self.log(f"AVISO: API key AssemblyAI parece inválida (muito curta: {len(api_key.strip())} caracteres)", "WARN")
+                            if not api_key:
+                                self.log("AVISO: Nenhuma key encontrada no arquivo keys_assembly.json e nenhuma key na interface!", "WARN")
+                                self.log("Adicione keys no arquivo keys_assembly.json ou configure na interface", "WARN")
+                        
+                        use_karaoke = config.get("sub_options", {}).get("use_karaoke", True)
+                        try:
+                            # Passar api_key como opcional (None se vazia)
+                            # O método tentará keys do arquivo automaticamente
+                            result = subtitle_engine.generate_with_assemblyai(
+                                audio_path, api_key if api_key else None, use_karaoke, return_full_data=True
+                            )
                             
-                            use_karaoke = config.get("sub_options", {}).get("use_karaoke", True)
-                            try:
-                                events, transcript, words = subtitle_engine.generate_with_assemblyai(
-                                    audio_path, api_key.strip(), use_karaoke, return_full_data=True
-                                )
+                            # Verificar se o resultado é válido
+                            if result is None:
+                                raise Exception("generate_with_assemblyai retornou None")
+                            
+                            # Unpack do resultado
+                            if isinstance(result, tuple) and len(result) == 3:
+                                events, transcript, words = result
+                            else:
+                                # Se não retornou tupla completa, tentar apenas events
+                                events = result if isinstance(result, list) else []
+                                transcript = None
+                                words = None
+                            
+                            if events:
                                 self.log(f"Transcrição AssemblyAI concluída: {len(events)} legendas", "INFO")
-                            except Exception as e:
-                                error_msg = str(e)
-                                if "Invalid API key" in error_msg or "401" in error_msg or "Unauthorized" in error_msg:
-                                    self.log("ERRO: Chave API AssemblyAI inválida ou expirada!", "ERROR")
-                                    self.log("Verifique se a chave API está correta e ativa em https://www.assemblyai.com/", "WARN")
-                                else:
-                                    self.log(f"Erro ao gerar legendas via AssemblyAI: {error_msg}", "ERROR")
-                                raise  # Re-raise para ser capturado pelo except externo
+                            else:
+                                self.log("AVISO: Nenhum evento de legenda gerado pela transcrição", "WARN")
+                        except Exception as e:
+                            error_msg = str(e)
+                            if "Invalid API key" in error_msg or "401" in error_msg or "Unauthorized" in error_msg or "Todas as keys" in error_msg:
+                                self.log("ERRO: Todas as keys do AssemblyAI falharam!", "ERROR")
+                                self.log("Verifique o arquivo keys_assembly.json e adicione keys válidas", "WARN")
+                                self.log("Para obter novas keys, acesse: https://www.assemblyai.com/app/account", "INFO")
+                            else:
+                                self.log(f"Erro ao gerar legendas via AssemblyAI: {error_msg}", "ERROR")
+                            raise  # Re-raise para ser capturado pelo except externo
                     
                     if events:
                         if subtitle_mode == "full":
@@ -3080,9 +3146,11 @@ class FinalSlideshowEngine:
                             vsl_end_time = None
                             if use_vsl and vsl_start_sec is not None and vsl_duration:
                                 vsl_start_time = subtitle_engine.ms_to_ass_time(int(vsl_start_sec * 1000))
-                                vsl_end_sec_for_subs = vsl_start_sec + vsl_duration - 0.1
+                                # IMPORTANTE: Usar o fim exato da VSL (sem subtrair 0.1) para legendas voltarem imediatamente
+                                vsl_end_sec_for_subs = vsl_start_sec + vsl_duration
                                 vsl_end_time = subtitle_engine.ms_to_ass_time(int(vsl_end_sec_for_subs * 1000))
                                 self.log(f"Legendas serão ocultadas durante VSL: {vsl_start_sec:.2f}s - {vsl_end_sec_for_subs:.2f}s", "INFO")
+                                self.log(f"Legendas retornarão imediatamente após VSL terminar em {vsl_end_sec_for_subs:.2f}s", "INFO")
                             
                             subtitle_engine.create_ass_file(
                                 events,
@@ -3095,7 +3163,7 @@ class FinalSlideshowEngine:
                             
                             # Aplicar legendas (queimar no vídeo) - FICA ACIMA DE TUDO
                             video_with_subs = os.path.join(temp_dir, "video_with_subtitles.mp4")
-                            subtitle_engine.burn_subtitles(current_video, ass_path, video_with_subs, use_gpu)
+                            subtitle_engine.burn_subtitles(current_video, ass_path, video_with_subs, use_gpu, config)
                             
                             if os.path.exists(video_with_subs):
                                 current_video = video_with_subs
@@ -3575,15 +3643,15 @@ class FinalSlideshowEngine:
                                 else:
                                     # Se legendas estão ativas com AssemblyAI, usar transcrição
                                     if config.get("use_subtitles") and config.get("subtitle_method") == "assemblyai":
-                                        api_key = config.get("assemblyai_key", "")
-                                        if api_key:
-                                            subtitle_engine = SubtitleEngine(self.log_queue)
-                                            use_karaoke = config.get("sub_options", {}).get("use_karaoke", True)
-                                            
-                                            # Obter dados completos da transcrição
+                                        # Usar sistema de fallback com múltiplas keys do arquivo
+                                        subtitle_engine = SubtitleEngine(self.log_queue)
+                                        use_karaoke = config.get("sub_options", {}).get("use_karaoke", True)
+                                        
+                                        try:
+                                            # Obter dados completos da transcrição (usa keys do arquivo automaticamente)
                                             events, transcript, words = subtitle_engine.generate_with_assemblyai(
                                                 config["audio_path"],
-                                                api_key,
+                                                None,  # None = usar keys do arquivo
                                                 use_karaoke,
                                                 return_full_data=True
                                             )
@@ -3604,7 +3672,8 @@ class FinalSlideshowEngine:
                                                 
                                                 # Calcular quando as legendas devem voltar
                                                 fade_duration = min(0.5, vsl_duration / 4)
-                                                vsl_end_for_subtitles_sec = vsl_start_sec + vsl_duration - 0.1
+                                                # IMPORTANTE: Usar o fim exato da VSL para legendas voltarem imediatamente
+                                                vsl_end_for_subtitles_sec = vsl_start_sec + vsl_duration
                                                 
                                                 # Converter para formato ASS
                                                 vsl_start_time = subtitle_engine.ms_to_ass_time(int(keyword_timestamp_ms))
@@ -3613,11 +3682,13 @@ class FinalSlideshowEngine:
                                                 self.log(f"Palavra-chave '{keyword_found}' encontrada em {vsl_start_sec:.2f}s", "OK")
                                                 self.log(f"VSL será inserido: início={vsl_start_sec:.2f}s, fim={vsl_end_sec:.2f}s", "INFO")
                                                 self.log(f"Legendas serão ocultadas de {vsl_start_sec:.2f}s até {vsl_end_for_subtitles_sec:.2f}s", "INFO")
+                                                self.log(f"Legendas retornarão imediatamente após VSL terminar em {vsl_end_for_subtitles_sec:.2f}s", "INFO")
                                             else:
                                                 self.log(f"Nenhuma palavra-chave encontrada no texto para idioma '{vsl_language}'", "WARN")
                                                 vsl_path = None
-                                        else:
-                                            self.log("Chave API AssemblyAI não configurada. Use modo 'Posição fixa' ou configure AssemblyAI.", "WARN")
+                                        except Exception as e:
+                                            self.log(f"Erro ao gerar transcrição para busca de palavras-chave: {e}", "WARN")
+                                            self.log("Use modo 'Posição fixa' ou adicione keys válidas no arquivo keys_assembly.json", "WARN")
                                             vsl_path = None
                                     
                                     # Se método é SRT, tentar buscar no arquivo SRT
@@ -3680,16 +3751,17 @@ class FinalSlideshowEngine:
                                 self.log("Arquivo SRT nao encontrado!", "WARN")
                                 events = []
                         else:
-                            api_key = config.get("assemblyai_key", "")
-                            if api_key:
-                                use_karaoke = config.get("sub_options", {}).get("use_karaoke", True)
+                            # Usar sistema de fallback com múltiplas keys do arquivo
+                            use_karaoke = config.get("sub_options", {}).get("use_karaoke", True)
+                            try:
                                 events = subtitle_engine.generate_with_assemblyai(
                                     config["audio_path"],
-                                    api_key,
+                                    None,  # None = usar keys do arquivo
                                     use_karaoke
                                 )
-                            else:
-                                self.log("Chave API AssemblyAI nao configurada!", "WARN")
+                            except Exception as e:
+                                self.log(f"Erro ao gerar legendas via AssemblyAI: {e}", "WARN")
+                                self.log("Adicione keys válidas no arquivo keys_assembly.json", "WARN")
                                 events = []
 
                     if events:
@@ -3706,7 +3778,7 @@ class FinalSlideshowEngine:
                             )
 
                             video_with_subs = os.path.join(temp_dir, "with_subtitles.mp4")
-                            subtitle_engine.burn_subtitles(current_video, ass_path, video_with_subs, use_gpu)
+                            subtitle_engine.burn_subtitles(current_video, ass_path, video_with_subs, use_gpu, config)
                             current_video = video_with_subs
                             self.log("Legendas queimadas no vídeo (burn-in)", "OK")
                         else:
@@ -4077,13 +4149,14 @@ class SubtitleEngine:
         self.log(f"SRT parseado: {len(events)} eventos", "OK")
         return events
 
-    def generate_with_assemblyai(self, audio_path, api_key, use_karaoke=True, return_full_data=False):
+    def generate_with_assemblyai(self, audio_path, api_key=None, use_karaoke=True, return_full_data=False):
         """
         Transcreve audio com AssemblyAI e retorna eventos com timing.
+        Usa sistema de fallback com múltiplas keys do arquivo keys_assembly.json.
         
         Args:
             audio_path: Caminho do arquivo de áudio
-            api_key: Chave API do AssemblyAI
+            api_key: Chave API do AssemblyAI (opcional, se None usa keys do arquivo)
             use_karaoke: Se deve usar efeito karaoke
             return_full_data: Se True, retorna também transcript e palavras completas
         
@@ -4094,61 +4167,93 @@ class SubtitleEngine:
         try:
             import assemblyai as aai
             
-            # Validar API key antes de configurar
-            if not api_key or not api_key.strip():
-                raise ValueError("API key do AssemblyAI não fornecida ou vazia")
+            # Carregar keys do arquivo
+            available_keys = load_assemblyai_keys()
             
-            # Limpar espaços da API key
-            api_key = api_key.strip()
+            # Se api_key foi fornecida, adicionar no início da lista
+            if api_key and api_key.strip():
+                available_keys.insert(0, api_key.strip())
             
-            # Verificar se parece válida (AssemblyAI keys geralmente têm 32+ caracteres)
-            if len(api_key) < 20:
-                self.log(f"AVISO: API key parece muito curta ({len(api_key)} caracteres). Verifique se está correta.", "WARN")
+            if not available_keys:
+                raise ValueError("Nenhuma API key do AssemblyAI configurada. Adicione keys no arquivo keys_assembly.json")
             
-            aai.settings.api_key = api_key
-
-            self.log("Iniciando transcricao AssemblyAI...", "INFO")
+            self.log(f"Tentando transcrição com {len(available_keys)} key(s) disponível(eis)...", "INFO")
             
             # Verificar se o arquivo de áudio existe
             if not os.path.exists(audio_path):
                 raise FileNotFoundError(f"Arquivo de áudio não encontrado: {audio_path}")
 
-            config = aai.TranscriptionConfig(language_detection=True)
-            transcriber = aai.Transcriber()
-            transcript = transcriber.transcribe(audio_path, config=config)
+            # Tentar cada key até uma funcionar
+            last_error = None
+            for idx, key in enumerate(available_keys, 1):
+                try:
+                    key = key.strip()
+                    if not key:
+                        continue
+                    
+                    if len(available_keys) > 1:
+                        self.log(f"Tentando key {idx}/{len(available_keys)}...", "DEBUG")
+                    
+                    # Verificar se parece válida
+                    if len(key) < 20:
+                        self.log(f"AVISO: Key {idx} parece muito curta ({len(key)} caracteres). Pulando...", "WARN")
+                        continue
+                    
+                    aai.settings.api_key = key
+                    
+                    if idx == 1:
+                        self.log("Iniciando transcricao AssemblyAI...", "INFO")
+                    
+                    config = aai.TranscriptionConfig(language_detection=True)
+                    transcriber = aai.Transcriber()
+                    transcript = transcriber.transcribe(audio_path, config=config)
 
-            if transcript.status == aai.TranscriptStatus.error:
-                error_msg = transcript.error or "Erro desconhecido"
-                # Melhorar mensagem de erro para API key inválida
-                if "401" in str(error_msg) or "Unauthorized" in str(error_msg) or "Invalid API key" in str(error_msg):
-                    raise Exception(f"API key AssemblyAI inválida ou expirada. Verifique sua chave em https://www.assemblyai.com/")
-                raise Exception(f"Erro AssemblyAI: {error_msg}")
+                    if transcript.status == aai.TranscriptStatus.error:
+                        error_msg = transcript.error or "Erro desconhecido"
+                        # Se for erro de API key, tentar próxima
+                        if "401" in str(error_msg) or "Unauthorized" in str(error_msg) or "Invalid API key" in str(error_msg):
+                            if len(available_keys) > idx:
+                                self.log(f"Key {idx} inválida, tentando próxima...", "WARN")
+                                last_error = f"API key {idx} inválida ou expirada"
+                                continue
+                            else:
+                                raise Exception(f"Todas as keys são inválidas. Última tentativa: {error_msg}")
+                        raise Exception(f"Erro AssemblyAI: {error_msg}")
 
-            if not transcript.words:
-                raise Exception("Nenhuma palavra detectada no audio")
+                    if not transcript.words:
+                        raise Exception("Nenhuma palavra detectada no audio")
 
-            self.log(f"Transcricao concluida: {len(transcript.words)} palavras", "OK")
+                    # Sucesso! Usar esta key
+                    if len(available_keys) > 1:
+                        self.log(f"Key {idx} funcionou! Transcricao concluida: {len(transcript.words)} palavras", "OK")
+                    else:
+                        self.log(f"Transcricao concluida: {len(transcript.words)} palavras", "OK")
+                    break
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    error_lower = error_msg.lower()
+                    
+                    # Se for erro de API key e ainda há keys para tentar
+                    if ("invalid api key" in error_lower or "401" in error_msg or "unauthorized" in error_lower) and len(available_keys) > idx:
+                        self.log(f"Key {idx} inválida, tentando próxima...", "WARN")
+                        last_error = error_msg
+                        continue
+                    
+                    # Se não for erro de API key ou é a última key, re-raise
+                    if len(available_keys) == idx:
+                        # Última key falhou
+                        if last_error:
+                            raise Exception(f"Todas as keys falharam. Último erro: {error_msg}")
+                        raise
+                    else:
+                        # Não é erro de API key, re-raise imediatamente
+                        raise
             
-        except Exception as e:
-            error_msg = str(e)
-            error_lower = error_msg.lower()
+            # Se chegou aqui sem break, nenhuma key funcionou
+            if 'transcript' not in locals():
+                raise Exception(f"Todas as {len(available_keys)} keys falharam. Verifique o arquivo keys_assembly.json")
             
-            # Detectar erros específicos de API key
-            if "invalid api key" in error_lower or "401" in error_msg or "unauthorized" in error_lower:
-                self.log("ERRO: API key AssemblyAI inválida ou expirada!", "ERROR")
-                self.log("Verifique se a chave API está correta e ativa em https://www.assemblyai.com/", "WARN")
-                self.log("Para obter uma nova chave API, acesse: https://www.assemblyai.com/app/account", "INFO")
-                raise Exception("API key AssemblyAI inválida ou expirada. Verifique sua chave em https://www.assemblyai.com/")
-            
-            # Detectar outros erros comuns
-            if "file not found" in error_lower or "no such file" in error_lower:
-                self.log(f"ERRO: Arquivo de áudio não encontrado: {audio_path}", "ERROR")
-                raise
-            
-            # Re-raise outros erros com mensagem melhorada
-            self.log(f"Erro na transcrição AssemblyAI: {error_msg}", "ERROR")
-            raise
-
             # Agrupar palavras em segmentos (4 palavras por linha)
             events = []
             segment_words = []
@@ -4306,7 +4411,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 vsl_end_sec = ass_time_to_seconds(vsl_end_time)
                 
                 # Se o evento se sobrepõe ao período do VSL, não adicionar
-                if not (event_end_sec <= vsl_start_sec or event_start_sec >= vsl_end_sec):
+                # IMPORTANTE: Usar comparação estrita para garantir que legendas voltem imediatamente após VSL
+                # Se evento começa exatamente quando VSL termina, incluir (>= vsl_end_sec)
+                if event_start_sec < vsl_end_sec and event_end_sec > vsl_start_sec:
                     continue  # Pular este evento (dentro do período VSL)
             
             dialogues.append(f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}")
@@ -4323,14 +4430,41 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             self.log(f"Arquivo ASS criado: {len(events)} legendas", "OK")
         return output_path
 
-    def burn_subtitles(self, video_path, ass_path, output_path, use_gpu=False):
+    def burn_subtitles(self, video_path, ass_path, output_path, use_gpu=False, config=None):
         """Aplica legendas ASS no video com FFmpeg."""
         self.log("Aplicando legendas no video...", "INFO")
 
         # Escape do path para Windows
         safe_ass = ass_path.replace("\\", "/").replace(":", "\\:")
 
-        encoder = self.get_encoder_args({}, use_gpu)  # Config padrão para legendas
+        # Obter argumentos do encoder (não depende de self.get_encoder_args)
+        if config is None:
+            config = {}
+        
+        bitrate = config.get("video_bitrate", "4M")
+        crf = config.get("video_crf", 23)
+        
+        # Verificar GPU disponível se use_gpu não foi especificado
+        if use_gpu is None:
+            # Tentar detectar GPU (verificação simples)
+            try:
+                result = subprocess.run(["nvidia-smi"], capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                use_gpu = result.returncode == 0
+            except:
+                use_gpu = False
+        
+        # Configurar encoder baseado em GPU e bitrate
+        if use_gpu:
+            if bitrate == "auto":
+                encoder = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", str(crf)]
+            else:
+                encoder = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", bitrate]
+        else:
+            if bitrate == "auto":
+                encoder = ["-c:v", "libx264", "-preset", "fast", "-crf", str(crf)]
+            else:
+                encoder = ["-c:v", "libx264", "-preset", "fast", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{int(bitrate[:-1])*2}M"]
 
         cmd = [
             "ffmpeg", "-y",
@@ -5458,7 +5592,12 @@ class FinalSlideshowApp(ctk.CTk):
         self.use_subtitles_var = ctk.BooleanVar(value=self.config.get("use_subtitles", False))
         self.subtitle_method_var = ctk.StringVar(value=self.config.get("subtitle_method", "srt"))
         self.srt_path_var = ctk.StringVar(value=self.config.get("srt_path", ""))
-        self.assemblyai_key_var = ctk.StringVar(value=self.config.get("assemblyai_key", ""))
+        # AssemblyAI key não é mais necessária na interface (usa keys do arquivo)
+        # Mantemos a variável para compatibilidade, mas não será usada
+        self.assemblyai_key_var = ctk.StringVar(value="")
+        # Variável para mostrar contagem de keys
+        keys_count = get_assemblyai_keys_count()
+        self.assemblyai_keys_count_var = ctk.StringVar(value=f"{keys_count} key(s)")
         self.sub_font_var = ctk.StringVar(value=self.config.get("sub_font_name", "Arial"))
         self.sub_font_size_var = ctk.IntVar(value=self.config.get("sub_font_size", 48))
         self.sub_color_primary_var = ctk.StringVar(value=self.config.get("sub_color_primary", "#FFFFFF"))
@@ -5662,7 +5801,9 @@ class FinalSlideshowApp(ctk.CTk):
             # Legendas
             "use_subtitles": self.use_subtitles_var.get(),
             "subtitle_method": self.subtitle_method_var.get(),
-            "assemblyai_key": self.assemblyai_key_var.get(),
+            # AssemblyAI key não é mais necessária (usa keys do arquivo)
+            # Mantido para compatibilidade, mas será ignorado
+            "assemblyai_key": "",
             "sub_font_name": self.sub_font_var.get(),
             "sub_font_size": int(self.sub_font_size_var.get()),
             "sub_color_primary": self.sub_color_primary_var.get(),
@@ -7322,14 +7463,44 @@ class FinalSlideshowApp(ctk.CTk):
             command=self.select_srt_file
         ).pack(side="left")
 
-        # Campo API Key
+        # Campo API Key - Agora mostra apenas contagem de keys do arquivo
         self.api_frame = ctk.CTkFrame(self.subtitles_options_frame, fg_color="transparent")
-        ctk.CTkLabel(self.api_frame, text="Chave API:", text_color=CORES["text"]).pack(side="left")
-        ctk.CTkEntry(
-            self.api_frame, textvariable=self.assemblyai_key_var, width=350, show="*",
-            fg_color=CORES["bg_input"], border_color=CORES["accent"]
+        ctk.CTkLabel(
+            self.api_frame, 
+            text="Keys AssemblyAI:", 
+            text_color=CORES["text"]
+        ).pack(side="left")
+        
+        # Label mostrando contagem de keys (atualizado dinamicamente)
+        self.assemblyai_keys_label = ctk.CTkLabel(
+            self.api_frame,
+            textvariable=self.assemblyai_keys_count_var,
+            text_color=CORES["accent"],
+            font=ctk.CTkFont(weight="bold")
+        )
+        self.assemblyai_keys_label.pack(side="left", padx=5)
+        
+        # Botão para atualizar contagem
+        ctk.CTkButton(
+            self.api_frame,
+            text="Atualizar",
+            width=80,
+            command=self.update_assemblyai_keys_count,
+            fg_color=CORES["accent"],
+            hover_color=CORES["accent_hover"]
+        ).pack(side="left", padx=5)
+        
+        # Label informativo
+        ctk.CTkLabel(
+            self.api_frame,
+            text="(Keys em keys_assembly.json)",
+            text_color=CORES["text_dim"],
+            font=ctk.CTkFont(size=10)
         ).pack(side="left", padx=5)
 
+        # Atualizar contagem de keys ao criar a interface
+        self.update_assemblyai_keys_count()
+        
         # Personalizacao
         self.create_subtitle_customization(self.subtitles_options_frame)
 
@@ -8022,6 +8193,21 @@ class FinalSlideshowApp(ctk.CTk):
             self.backlog_mode_folder_var.set(folder)
             self.update_backlog_mode_status()
 
+    def update_assemblyai_keys_count(self):
+        """Atualiza a contagem de keys do AssemblyAI no label."""
+        try:
+            count = get_assemblyai_keys_count()
+            self.assemblyai_keys_count_var.set(f"{count} key(s)")
+            if count == 0:
+                # Usar cor de aviso se disponível, senão usar cor padrão
+                warning_color = CORES.get("warning") if "warning" in CORES else "#FFA500"
+                self.assemblyai_keys_label.configure(text_color=warning_color)
+            else:
+                self.assemblyai_keys_label.configure(text_color=CORES["accent"])
+        except Exception as e:
+            self.assemblyai_keys_count_var.set("Erro ao carregar")
+            self.log(f"Erro ao atualizar contagem de keys: {e}", "DEBUG")
+    
     def update_backlog_mode_status(self):
         """Atualiza status dos vídeos do backlog (modo completo, ignorando pasta USADOS)."""
         # Verificar se modo backlog está ativo (via video_mode ou use_backlog_mode_var)
@@ -9290,7 +9476,9 @@ v2.0 (Versão Base)
             "subtitle_method": self.subtitle_method_var.get(),
             "srt_source": self.subtitle_method_var.get(),  # Usar subtitle_method como srt_source
             "srt_path": self.srt_path_var.get(),
-            "assemblyai_key": self.assemblyai_key_var.get(),
+            # AssemblyAI key não é mais necessária (usa keys do arquivo)
+            # Mantido para compatibilidade, mas será ignorado
+            "assemblyai_key": "",
             # Modo de Vídeo
             "video_mode": self.video_mode_var.get(),
             "use_srt_based_images": self.video_mode_var.get() == "srt",  # Compatibilidade

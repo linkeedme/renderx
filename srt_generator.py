@@ -152,34 +152,113 @@ class SRTGenerator:
 
         return (start_time, end_time)
 
-    def generate_srt_from_assemblyai(self, audio_path: str, api_key: str) -> List[SRTBlock]:
+    def generate_srt_from_assemblyai(self, audio_path: str, api_key: str = None) -> List[SRTBlock]:
         """
         Gera blocos SRT a partir de áudio usando AssemblyAI.
+        Usa sistema de fallback com múltiplas keys do arquivo keys_assembly.json.
 
         Args:
             audio_path: Caminho do arquivo de áudio
-            api_key: Chave API do AssemblyAI
+            api_key: Chave API do AssemblyAI (opcional, se None usa keys do arquivo)
 
         Returns:
             Lista de blocos SRT
         """
         try:
             import assemblyai as aai
-            aai.settings.api_key = api_key
+            import json
+            from pathlib import Path
+            
+            # Carregar keys do arquivo
+            script_dir = Path(__file__).parent.absolute()
+            keys_file = script_dir / "keys_assembly.json"
+            available_keys = []
+            
+            if keys_file.exists():
+                try:
+                    with open(keys_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        keys_list = data.get("keys", [])
+                        available_keys = [key.strip() for key in keys_list if key and key.strip()]
+                except Exception:
+                    pass
+            
+            # Se api_key foi fornecida, adicionar no início da lista
+            if api_key and api_key.strip():
+                available_keys.insert(0, api_key.strip())
+            
+            if not available_keys:
+                raise ValueError("Nenhuma API key do AssemblyAI configurada. Adicione keys no arquivo keys_assembly.json")
+            
+            self.log(f"Tentando transcrição com {len(available_keys)} key(s) disponível(eis)...", "INFO")
+            
+            # Tentar cada key até uma funcionar
+            last_error = None
+            for idx, key in enumerate(available_keys, 1):
+                try:
+                    key = key.strip()
+                    if not key:
+                        continue
+                    
+                    if len(available_keys) > 1:
+                        self.log(f"Tentando key {idx}/{len(available_keys)}...", "DEBUG")
+                    
+                    if len(key) < 20:
+                        self.log(f"AVISO: Key {idx} parece muito curta ({len(key)} caracteres). Pulando...", "WARN")
+                        continue
+                    
+                    aai.settings.api_key = key
+                    
+                    if idx == 1:
+                        self.log("Iniciando transcrição AssemblyAI...", "INFO")
+                    
+                    config = aai.TranscriptionConfig(language_detection=True)
+                    transcriber = aai.Transcriber()
+                    transcript = transcriber.transcribe(audio_path, config=config)
 
-            self.log("Iniciando transcrição AssemblyAI...", "INFO")
+                    if transcript.status == aai.TranscriptStatus.error:
+                        error_msg = transcript.error or "Erro desconhecido"
+                        # Se for erro de API key, tentar próxima
+                        if "401" in str(error_msg) or "Unauthorized" in str(error_msg) or "Invalid API key" in str(error_msg):
+                            if len(available_keys) > idx:
+                                self.log(f"Key {idx} inválida, tentando próxima...", "WARN")
+                                last_error = error_msg
+                                continue
+                            else:
+                                raise Exception(f"Todas as keys são inválidas. Última tentativa: {error_msg}")
+                        raise Exception(f"Erro AssemblyAI: {error_msg}")
 
-            config = aai.TranscriptionConfig(language_detection=True)
-            transcriber = aai.Transcriber()
-            transcript = transcriber.transcribe(audio_path, config=config)
+                    if not transcript.words:
+                        raise Exception("Nenhuma palavra detectada no áudio")
 
-            if transcript.status == aai.TranscriptStatus.error:
-                raise Exception(f"Erro AssemblyAI: {transcript.error}")
-
-            if not transcript.words:
-                raise Exception("Nenhuma palavra detectada no áudio")
-
-            self.log(f"Transcrição concluída: {len(transcript.words)} palavras", "OK")
+                    # Sucesso!
+                    if len(available_keys) > 1:
+                        self.log(f"Key {idx} funcionou! Transcrição concluída: {len(transcript.words)} palavras", "OK")
+                    else:
+                        self.log(f"Transcrição concluída: {len(transcript.words)} palavras", "OK")
+                    break
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    error_lower = error_msg.lower()
+                    
+                    # Se for erro de API key e ainda há keys para tentar
+                    if ("invalid api key" in error_lower or "401" in error_msg or "unauthorized" in error_lower) and len(available_keys) > idx:
+                        self.log(f"Key {idx} inválida, tentando próxima...", "WARN")
+                        last_error = error_msg
+                        continue
+                    
+                    # Se não for erro de API key ou é a última key, re-raise
+                    if len(available_keys) == idx:
+                        if last_error:
+                            raise Exception(f"Todas as keys falharam. Último erro: {error_msg}")
+                        raise
+                    else:
+                        raise
+            
+            # Se chegou aqui sem break, nenhuma key funcionou
+            if 'transcript' not in locals():
+                raise Exception(f"Todas as {len(available_keys)} keys falharam. Verifique o arquivo keys_assembly.json")
 
             # Agrupar palavras em segmentos (4 palavras por linha)
             blocks = []

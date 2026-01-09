@@ -47,7 +47,7 @@ import re
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from tkinter import font as tkfont, colorchooser
+from tkinter import font as tkfont, colorchooser, filedialog
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Dict, Any
 
@@ -125,6 +125,8 @@ from vsl_manager import (
     get_vsl_summary,
     get_vsls_with_display_names
 )
+from backlog_video_manager import BacklogVideoManager
+from character_manager import CharacterManager
 from whisk_pool_manager import (
     get_pool_manager, 
     get_enabled_tokens, 
@@ -251,16 +253,19 @@ DEFAULT_CONFIG = {
     "vsl_language": "portugues",  # Idioma das palavras-chave para busca
     "selected_vsl": "",  # Nome do arquivo da VSL selecionada
     "vsl_insertion_mode": "keyword",  # "keyword" (buscar palavra-chave), "fixed" (posição fixa) ou "range" (aleatório em range)
+    "vsl_insertion_method": "keyword",  # Alias para vsl_insertion_mode (para compatibilidade com novo modo backlog)
     "vsl_fixed_position": 60.0,  # Posição fixa em segundos (se vsl_insertion_mode="fixed")
-    "vsl_range_start_min": 1.0,  # Minuto inicial do range (se vsl_insertion_mode="range")
-    "vsl_range_end_min": 3.0,  # Minuto final do range (se vsl_insertion_mode="range")
-    # Backlog Videos (Vídeos Introdutórios)
-    "use_backlog_videos": False,
-    "backlog_folder": str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS"),
-    "backlog_video_count": 6,
-    "backlog_audio_volume": 0.25,
-    "backlog_transition_duration": 0.5,  # Crossfade entre vídeos
-    "backlog_fade_out_duration": 1.0,     # Fade out no último
+    "vsl_range_start_min": 5.0,  # Minuto inicial do range (se vsl_insertion_mode="range" ou "time_range")
+    "vsl_range_end_min": 8.0,  # Minuto final do range (se vsl_insertion_mode="range" ou "time_range")
+    "vsl_fallback_language": "portugues",  # Idioma padrão para palavras-chave VSL
+    # Modo Backlog Completo (usa vídeos para cobrir toda duração)
+    "use_backlog_mode": False,            # Novo modo: usa backlog para cobrir toda duração do áudio
+    "backlog_used_folder": "USADOS",      # Pasta onde vídeos usados são movidos
+    "backlog_cache_file": "backlog_cache.json",  # Cache de durações de vídeos
+    # Personagem Principal
+    "use_character": False,               # Adicionar personagem principal
+    "character_path": "",                 # Caminho do personagem (PNG ou MP4)
+    "character_position": "right",        # Posição: "center", "left", "right"
     # Geração de Imagens via SRT
     "use_srt_based_images": False,
     "image_source": "generate",           # "generate" ou "backlog"
@@ -464,6 +469,8 @@ class FinalSlideshowEngine:
         self.motion_shuffler = MotionShuffler(self.log)
         self.prompt_manager = PromptManager(str(SCRIPT_DIR), self.log)
         self.overlay_manager = OverlayManager(log_callback=self.log)
+        self.backlog_manager = BacklogVideoManager(log_callback=self.log)
+        self.character_manager = CharacterManager(log_callback=self.log)
 
     def get_encoder_args(self, config, use_gpu=None):
         """Retorna os argumentos do encoder baseado na configuração de bitrate.
@@ -2730,6 +2737,389 @@ class FinalSlideshowEngine:
             return None, None
 
     # =========================================================================
+    # PIPELINE COMPLETO COM BACKLOG DE VÍDEOS
+    # =========================================================================
+    def render_with_backlog_videos(self, config, temp_dir: str) -> Optional[str]:
+        """
+        Renderiza vídeo usando vídeos do backlog para cobrir toda a duração do áudio.
+        
+        Pipeline:
+        1. Selecionar vídeos do backlog para cobrir duração do áudio
+        2. Mover vídeos selecionados para pasta USADOS
+        3. Concatenar vídeos sem transições
+        4. Aplicar personagem principal (se configurado)
+        5. Aplicar overlay (se configurado)
+        6. Inserir VSL (se configurado)
+        7. Mixar áudio: narração + música de fundo
+        8. Retornar vídeo final
+        
+        Args:
+            config: Dicionário de configuração
+            temp_dir: Diretório temporário
+            
+        Returns:
+            Caminho do vídeo final ou None se erro
+        """
+        try:
+            self.log("+================================================+", "INFO")
+            self.log("|  MODO: BACKLOG DE VÍDEOS                       |", "ENGINE")
+            self.log("+================================================+", "INFO")
+            
+            # 1. Obter duração do áudio
+            audio_path = config.get("audio_path", "")
+            if not audio_path or not os.path.exists(audio_path):
+                self.log("Caminho do áudio não encontrado", "ERROR")
+                return None
+            
+            audio_duration = self.get_audio_duration(audio_path)
+            if audio_duration is None:
+                self.log("Não foi possível obter duração do áudio", "ERROR")
+                return None
+            
+            minutes = int(audio_duration // 60)
+            seconds = int(audio_duration % 60)
+            self.log(f"Duração do áudio: {minutes}m {seconds}s ({audio_duration:.1f}s)", "INFO")
+            
+            # Verificar disponibilidade de GPU uma vez no início
+            use_gpu = self.check_gpu_available()
+            
+            # 2. Configurar pasta do backlog
+            backlog_folder = config.get("backlog_folder", str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS"))
+            if backlog_folder:
+                if not os.path.isabs(backlog_folder):
+                    backlog_folder = str(SCRIPT_DIR / backlog_folder)
+            else:
+                backlog_folder = str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS")
+            
+            used_folder_name = config.get("backlog_used_folder", "USADOS")
+            
+            # 3. Selecionar vídeos do backlog
+            self.log(f"Selecionando vídeos do backlog para cobrir {audio_duration:.1f}s...", "INFO")
+            selected_videos = self.backlog_manager.select_backlog_videos(
+                backlog_folder, audio_duration, used_folder_name
+            )
+            
+            if not selected_videos:
+                self.log("Não foi possível selecionar vídeos suficientes do backlog", "ERROR")
+                return None
+            
+            self.log(f"Selecionados {len(selected_videos)} vídeos do backlog", "OK")
+            
+            # 4. Mover vídeos selecionados para pasta USADOS
+            self.log("Movendo vídeos selecionados para pasta USADOS...", "INFO")
+            moved_videos = self.backlog_manager.move_used_videos_to_used_folder(
+                selected_videos, backlog_folder, used_folder_name
+            )
+            
+            if not moved_videos:
+                self.log("Erro ao mover vídeos para USADOS, usando caminhos originais", "WARN")
+                moved_videos = selected_videos
+            
+            # 5. Obter resolução
+            resolution_str = config.get("resolution", "720p")
+            resolution = RESOLUTIONS.get(resolution_str, (1280, 720))
+            width, height = resolution
+            
+            # 6. Concatenar vídeos sem transições
+            self.log(f"Concatenando {len(moved_videos)} vídeo(s) sem transições...", "INFO")
+            use_gpu = self.check_gpu_available()
+            
+            concatenated_video = os.path.join(temp_dir, "backlog_concatenated.mp4")
+            result = self.backlog_manager.concatenate_videos(
+                moved_videos, concatenated_video, resolution, use_gpu, normalize=True, temp_dir=temp_dir
+            )
+            
+            if not result or not os.path.exists(concatenated_video):
+                self.log("Erro ao concatenar vídeos do backlog", "ERROR")
+                return None
+            
+            self.log(f"Vídeos concatenados com sucesso: {concatenated_video}", "OK")
+            current_video = concatenated_video
+            
+            # 7. Aplicar personagem principal (se configurado)
+            use_character = config.get("use_character", False)
+            character_path = config.get("character_path", "")
+            
+            if use_character and character_path and os.path.exists(character_path):
+                self.log("Aplicando personagem principal...", "INFO")
+                character_position = config.get("character_position", "right")
+                video_with_character = os.path.join(temp_dir, "video_with_character.mp4")
+                
+                result = self.character_manager.apply_character(
+                    current_video, character_path, character_position, 
+                    video_with_character, resolution
+                )
+                
+                if result and os.path.exists(video_with_character):
+                    current_video = video_with_character
+                    self.log("Personagem aplicado com sucesso", "OK")
+                else:
+                    self.log("Erro ao aplicar personagem, continuando sem personagem", "WARN")
+            
+            # 8. Aplicar overlay (se configurado) - Overlay único selecionado
+            overlay_path = config.get("overlay_path", "")
+            if overlay_path and os.path.exists(overlay_path):
+                self.log("Aplicando overlay...", "INFO")
+                self.log(f"Aplicando overlay: {os.path.basename(overlay_path)}", "INFO")
+                overlay_opacity = config.get("overlay_opacity", 0.3)
+                video_with_overlay = os.path.join(temp_dir, "video_with_overlay.mp4")
+                
+                # Usar método apply_overlay direto (mais simples e confiável)
+                result = self.apply_overlay(
+                    current_video, overlay_path, video_with_overlay, overlay_opacity
+                )
+                
+                if result and os.path.exists(video_with_overlay):
+                    current_video = video_with_overlay
+                    self.log("Overlay aplicado com sucesso", "OK")
+                else:
+                    self.log("Erro ao aplicar overlay, continuando sem overlay", "WARN")
+            else:
+                if overlay_path:
+                    self.log(f"Overlay não encontrado: {overlay_path}", "WARN")
+                else:
+                    self.log("Nenhum overlay configurado", "DEBUG")
+            
+            # 9. Preparar VSL (calcular posição ANTES de aplicar legendas, mas inserir DEPOIS)
+            use_vsl = config.get("use_vsl", False)
+            vsl_start_sec = None
+            vsl_duration = None
+            vsl_path = None
+            
+            if use_vsl:
+                # Obter VSL e calcular posição, mas ainda não inserir
+                vsl_folder = config.get("vsl_folder", str(SCRIPT_DIR / "EFEITOS" / "VSLs"))
+                if not os.path.isabs(vsl_folder):
+                    vsl_folder = str(SCRIPT_DIR / vsl_folder)
+                
+                selected_vsl = config.get("selected_vsl", "")
+                if selected_vsl and selected_vsl != "Nenhuma VSL encontrada":
+                    vsl_path = os.path.join(vsl_folder, selected_vsl)
+                    if not os.path.exists(vsl_path):
+                        vsl_path = None
+                
+                if vsl_path and os.path.exists(vsl_path):
+                    # Obter duração do VSL
+                    vsl_engine_temp = VSLEngine(self.log_queue)
+                    vsl_duration = vsl_engine_temp.get_video_duration(vsl_path)
+                    
+                    if vsl_duration:
+                        # Determinar método de inserção
+                        vsl_insertion_method = config.get("vsl_insertion_method") or config.get("vsl_insertion_mode", "keyword")
+                        if vsl_insertion_method == "time_range":
+                            vsl_insertion_method = "range"
+                        
+                        if vsl_insertion_method == "range":
+                            # Modo range de tempo: inserir aleatoriamente no range
+                            import random
+                            range_start_min = float(config.get("vsl_range_start_min", 5.0))
+                            range_end_min = float(config.get("vsl_range_end_min", 8.0))
+                            
+                            if range_start_min > range_end_min:
+                                range_start_min, range_end_min = range_end_min, range_start_min
+                            
+                            range_start_sec = range_start_min * 60.0
+                            range_end_sec = range_end_min * 60.0
+                            
+                            # Ajustar range para garantir que VSL cabe
+                            max_start_position = audio_duration - vsl_duration
+                            effective_range_end = min(range_end_sec, max_start_position)
+                            
+                            if effective_range_end > range_start_sec:
+                                vsl_start_sec = random.uniform(range_start_sec, effective_range_end)
+                                self.log(f"VSL será inserida em {vsl_start_sec:.2f}s (range: {range_start_sec:.0f}s - {effective_range_end:.0f}s)", "INFO")
+                            else:
+                                vsl_start_sec = max(0, audio_duration * 0.5)
+                                self.log(f"Range inválido, usando posição padrão: {vsl_start_sec:.2f}s", "WARN")
+                        
+                        elif vsl_insertion_method == "keyword":
+                            # Modo palavra-chave: buscar no SRT (se disponível)
+                            srt_path = config.get("srt_path", "")
+                            if srt_path and os.path.exists(srt_path):
+                                # Carregar palavras-chave
+                                keywords_file = config.get("vsl_keywords_file", str(SCRIPT_DIR / "vsl_keywords.json"))
+                                keywords = load_vsl_keywords(keywords_file)
+                                language = config.get("vsl_fallback_language", "portugues")
+                                
+                                timestamp_ms, keyword = self._find_keyword_in_srt(
+                                    srt_path, keywords, language
+                                )
+                                if timestamp_ms is not None:
+                                    vsl_start_sec = timestamp_ms / 1000.0
+                                    self.log(f"Palavra-chave '{keyword}' encontrada, VSL será inserida em {vsl_start_sec:.2f}s", "INFO")
+                                else:
+                                    vsl_start_sec = max(0, audio_duration * 0.5)
+                                    self.log("Palavra-chave não encontrada, usando posição padrão", "WARN")
+                            else:
+                                vsl_start_sec = max(0, audio_duration * 0.5)
+                                self.log("SRT não encontrado, usando posição padrão", "WARN")
+                        else:
+                            vsl_start_sec = max(0, audio_duration * 0.5)
+            
+            # 10. Aplicar legendas (se configurado) - DEPOIS de overlay e personagem para ficar acima
+            if config.get("use_subtitles"):
+                self.log("Aplicando legendas...", "INFO")
+                subtitle_mode = config.get("subtitle_mode", "full")
+                subtitle_engine = SubtitleEngine(self.log_queue)
+                
+                try:
+                    # Obter eventos de legenda
+                    events = []
+                    if config.get("subtitle_method") == "srt":
+                        srt_path = config.get("srt_path", "")
+                        if srt_path and os.path.exists(srt_path):
+                            events = subtitle_engine.parse_srt(srt_path)
+                            self.log(f"SRT carregado: {len(events)} legendas", "INFO")
+                        else:
+                            self.log("Arquivo SRT não encontrado!", "WARN")
+                    else:  # assemblyai
+                        api_key = config.get("assemblyai_key", "")
+                        if api_key:
+                            use_karaoke = config.get("sub_options", {}).get("use_karaoke", True)
+                            events, transcript, words = subtitle_engine.generate_with_assemblyai(
+                                audio_path, api_key, use_karaoke, return_full_data=True
+                            )
+                            self.log(f"Transcrição AssemblyAI concluída: {len(events)} legendas", "INFO")
+                        else:
+                            self.log("Chave API AssemblyAI não configurada!", "WARN")
+                    
+                    if events:
+                        if subtitle_mode == "full":
+                            # Criar arquivo ASS
+                            ass_path = os.path.join(temp_dir, "subtitles.ass")
+                            
+                            # Se VSL for inserida, ocultar legendas durante VSL
+                            vsl_start_time = None
+                            vsl_end_time = None
+                            if use_vsl and vsl_start_sec is not None and vsl_duration:
+                                vsl_start_time = subtitle_engine.ms_to_ass_time(int(vsl_start_sec * 1000))
+                                vsl_end_sec_for_subs = vsl_start_sec + vsl_duration - 0.1
+                                vsl_end_time = subtitle_engine.ms_to_ass_time(int(vsl_end_sec_for_subs * 1000))
+                                self.log(f"Legendas serão ocultadas durante VSL: {vsl_start_sec:.2f}s - {vsl_end_sec_for_subs:.2f}s", "INFO")
+                            
+                            subtitle_engine.create_ass_file(
+                                events,
+                                config.get("sub_options", {}),
+                                ass_path,
+                                config["resolution"],
+                                vsl_start_time=vsl_start_time,
+                                vsl_end_time=vsl_end_time
+                            )
+                            
+                            # Aplicar legendas (queimar no vídeo) - FICA ACIMA DE TUDO
+                            video_with_subs = os.path.join(temp_dir, "video_with_subtitles.mp4")
+                            subtitle_engine.burn_subtitles(current_video, ass_path, video_with_subs, use_gpu)
+                            
+                            if os.path.exists(video_with_subs):
+                                current_video = video_with_subs
+                                self.log("Legendas aplicadas com sucesso (camada mais acima)", "OK")
+                            else:
+                                self.log("Erro ao aplicar legendas, continuando sem legendas", "WARN")
+                        else:
+                            # Modo SRT separado - exportar como arquivo SRT
+                            if "output_path" in config and config["output_path"]:
+                                srt_output = config["output_path"].replace(".mp4", ".srt")
+                            else:
+                                srt_output = os.path.join(temp_dir, "subtitles.srt")
+                            
+                            # Converter eventos para formato SRT
+                            try:
+                                with open(srt_output, 'w', encoding='utf-8') as f:
+                                    for i, event in enumerate(events, 1):
+                                        if isinstance(event, tuple) and len(event) == 3:
+                                            # Formato tupla: (start, end, text) - formato ASS (H:MM:SS.CS)
+                                            start_ass, end_ass, text = event
+                                            # Converter ASS time (H:MM:SS.CS) para SRT time (HH:MM:SS,mmm)
+                                            start_srt = subtitle_engine._ass_time_to_srt_time(start_ass)
+                                            end_srt = subtitle_engine._ass_time_to_srt_time(end_ass)
+                                            f.write(f"{i}\n")
+                                            f.write(f"{start_srt} --> {end_srt}\n")
+                                            f.write(f"{text}\n\n")
+                                        elif isinstance(event, dict):
+                                            # Formato dict: usar método existente
+                                            start_ms = event.get('start_ms', 0)
+                                            end_ms = event.get('end_ms', 0)
+                                            text = event.get('text', '')
+                                            start_srt = subtitle_engine._ms_to_srt_time(start_ms)
+                                            end_srt = subtitle_engine._ms_to_srt_time(end_ms)
+                                            f.write(f"{i}\n")
+                                            f.write(f"{start_srt} --> {end_srt}\n")
+                                            f.write(f"{text}\n\n")
+                                self.log(f"SRT exportado: {srt_output} ({len(events)} legendas)", "OK")
+                            except Exception as e:
+                                self.log(f"Erro ao exportar SRT: {e}", "WARN")
+                                import traceback
+                                self.log(traceback.format_exc(), "ERROR")
+                    else:
+                        self.log("Nenhum evento de legenda gerado", "WARN")
+                except Exception as e:
+                    self.log(f"Erro ao aplicar legendas: {e}", "ERROR")
+                    import traceback
+                    self.log(traceback.format_exc(), "ERROR")
+            
+            # 11. Inserir VSL (se configurado) - DEPOIS das legendas
+            # VSL já foi preparada no passo 9, apenas inserir agora
+            if use_vsl and vsl_path and vsl_start_sec is not None and vsl_duration:
+                self.log(f"Inserindo VSL em {vsl_start_sec:.2f}s (duração VSL: {vsl_duration:.2f}s)...", "INFO")
+                video_with_vsl = os.path.join(temp_dir, "video_with_vsl.mp4")
+                vsl_engine = VSLEngine(self.log_queue)
+                result = vsl_engine.insert_vsl(
+                    current_video, vsl_path, vsl_start_sec, video_with_vsl, use_gpu
+                )
+                
+                if result and os.path.exists(video_with_vsl):
+                    current_video = video_with_vsl
+                    # Armazenar informações para mixagem de áudio
+                    config["vsl_inserted_start"] = vsl_start_sec
+                    config["vsl_inserted_duration"] = vsl_duration
+                    self.log("VSL inserida com sucesso", "OK")
+                else:
+                    self.log("Erro ao inserir VSL, continuando sem VSL", "WARN")
+            
+            # 12. Mixar áudio: narração + música de fundo
+            music_path = config.get("music_path", "")
+            music_volume = config.get("music_volume", 0.2)
+            
+            if music_path and os.path.exists(music_path):
+                self.log("Mixando áudio (narração + música de fundo)...", "INFO")
+                video_with_audio = os.path.join(temp_dir, "video_final_with_audio.mp4")
+                result = self.mix_audio(
+                    current_video, audio_path, music_path, video_with_audio, 
+                    music_volume, config
+                )
+                
+                if result and os.path.exists(video_with_audio):
+                    current_video = video_with_audio
+                    self.log("Áudio mixado com sucesso", "OK")
+                else:
+                    self.log("Erro ao mixar áudio, adicionando apenas narração", "WARN")
+                    # Fallback: adicionar apenas narração
+                    video_with_narration = os.path.join(temp_dir, "video_final_narration.mp4")
+                    result = self.finalize_simple(current_video, audio_path, video_with_narration, config)
+                    if result and os.path.exists(video_with_narration):
+                        current_video = video_with_narration
+            else:
+                # Apenas adicionar narração
+                self.log("Adicionando narração ao vídeo...", "INFO")
+                video_with_narration = os.path.join(temp_dir, "video_final_narration.mp4")
+                result = self.finalize_simple(current_video, audio_path, video_with_narration, config)
+                if result and os.path.exists(video_with_narration):
+                    current_video = video_with_narration
+            
+            if not current_video or not os.path.exists(current_video):
+                self.log("Erro ao finalizar vídeo", "ERROR")
+                return None
+            
+            self.log(f"Vídeo final renderizado com sucesso: {current_video}", "OK")
+            return current_video
+            
+        except Exception as e:
+            self.log(f"Erro no pipeline de backlog: {e}", "ERROR")
+            import traceback
+            self.log(traceback.format_exc(), "ERROR")
+            return None
+
+    # =========================================================================
     # PIPELINE COMPLETO
     # =========================================================================
     def render_full_video(self, config):
@@ -2748,44 +3138,50 @@ class FinalSlideshowEngine:
             seconds = int(audio_duration % 60)
             self.log(f"Audio: {minutes}m {seconds}s ({audio_duration:.1f}s)", "INFO")
 
+            # Verificar modo backlog completo (usa vídeos do backlog para cobrir toda a duração)
+            # Este modo é mutuamente exclusivo com os outros modos (tradicional, SRT, single_image)
+            # Pode vir de use_backlog_mode (antigo) ou video_mode == "backlog" (novo)
+            video_mode = config.get("video_mode", "traditional")
+            use_backlog_mode = config.get("use_backlog_mode", False) or (video_mode == "backlog")
+            if use_backlog_mode:
+                # Usar modo backlog completo - pipeline completo já está implementado no método
+                video_result = self.render_with_backlog_videos(config, temp_dir)
+                if video_result and os.path.exists(video_result):
+                    # Determinar output_path (usar config ou criar baseado em output_folder)
+                    if "output_path" in config and config["output_path"]:
+                        output_path = config["output_path"]
+                    else:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        output_filename = f"Slideshow_BACKLOG_{timestamp}.mp4"
+                        output_folder = config.get("output_folder", config.get("batch_output_folder", ""))
+                        if output_folder:
+                            os.makedirs(output_folder, exist_ok=True)
+                            output_path = os.path.join(output_folder, output_filename)
+                        else:
+                            # Fallback: usar mesmo diretório do vídeo temporário
+                            output_path = os.path.join(os.path.dirname(video_result), f"backlog_final_{timestamp}.mp4")
+                    
+                    # Copiar vídeo final para output_path
+                    try:
+                        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+                        shutil.copy2(video_result, output_path)
+                        self.log(f"Vídeo final salvo: {output_path}", "OK")
+                        # Limpar temp_dir após cópia bem-sucedida
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return output_path
+                    except Exception as e:
+                        self.log(f"Erro ao salvar vídeo final: {e}", "ERROR")
+                        # Em caso de erro, retornar vídeo temporário sem limpar
+                        return video_result
+                else:
+                    self.log("Falha no modo backlog completo", "ERROR")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    return None
+
             # Verificar modo de vídeo
             video_mode = config.get("video_mode", "traditional")
             use_srt_based = config.get("use_srt_based_images", False) or video_mode == "srt"
             use_single_image = video_mode == "single_image"
-            
-            # ETAPA 0: Backlog Videos (se ativo) - Funciona em todos os modos (exceto single_image)
-            backlog_intro = None
-            if config.get("use_backlog_videos", False):
-                self.log("+================================================+", "INFO")
-                self.log("|  ETAPA 0: BACKLOG VIDEOS (INTRO)              |", "ENGINE")
-                self.log("+================================================+", "INFO")
-                
-                backlog_folder = config.get("backlog_folder", str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS"))
-                if backlog_folder:
-                    if not os.path.isabs(backlog_folder):
-                        backlog_folder = str(SCRIPT_DIR / backlog_folder)
-                else:
-                    backlog_folder = str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS")
-                
-                backlog_intro_path = os.path.join(temp_dir, "backlog_intro.mp4")
-                backlog_engine = BacklogVideoEngine(self.log_queue)
-                
-                use_gpu = self.check_gpu_available()
-                backlog_intro = backlog_engine.create_backlog_intro(
-                    backlog_folder=backlog_folder,
-                    output_path=backlog_intro_path,
-                    resolution=config["resolution"],
-                    target_duration=60.0,  # Sempre 1 minuto (60 segundos)
-                    audio_volume=config.get("backlog_audio_volume", 0.25),
-                    transition_duration=config.get("backlog_transition_duration", 0.5),
-                    fade_out_duration=config.get("backlog_fade_out_duration", 1.0),
-                    use_gpu=use_gpu
-                )
-                
-                if backlog_intro is None:
-                    self.log("Falha ao criar intro do backlog. Continuando sem intro...", "WARN")
-                else:
-                    self.log(f"Intro do backlog criada: {backlog_intro}", "OK")
             
             if use_single_image:
                 # MODO 1 IMAGEM: Pêndulo com loop seamless
@@ -2820,16 +3216,31 @@ class FinalSlideshowEngine:
                 
             else:
                 # LÓGICA ANTIGA: Seleção baseada em duração fixa
+                # No modo backlog, este bloco não deve ser executado (já tratado acima)
+                # Verificar novamente para garantir
+                video_mode_check = config.get("video_mode", "traditional")
+                if video_mode_check == "backlog":
+                    # Isso não deveria acontecer, mas se acontecer, retornar erro
+                    self.log("ERRO: Modo backlog deveria ter sido tratado anteriormente!", "ERROR")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    return None
+                
                 # Listar imagens (suporta lista pre-selecionada ou pasta)
                 if "images_list" in config and config["images_list"]:
                     all_images = config["images_list"]
                     self.log(f"Imagens pre-selecionadas: {len(all_images)}", "INFO")
                 else:
-                    all_images = self.get_image_files(config["images_folder"])
+                    images_folder = config.get("images_folder", "")
+                    if not images_folder:
+                        self.log("ERRO: Pasta de imagens não configurada!", "ERROR")
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        return None
+                    all_images = self.get_image_files(images_folder)
                     self.log(f"Imagens disponiveis: {len(all_images)}", "INFO")
 
                 if len(all_images) == 0:
                     self.log("ERRO: Nenhuma imagem encontrada!", "ERROR")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
                     return None
 
                 # Calcular quantas imagens precisamos
@@ -2901,141 +3312,21 @@ class FinalSlideshowEngine:
                 # Definir current_video para modo antigo
                 current_video = video_stitched
 
-            # ETAPA 2.5: Concatenar backlog intro + vídeo principal (se backlog existe)
-            # Funciona em ambos os modos (tradicional e SRT-based)
-            if backlog_intro and os.path.exists(backlog_intro):
-                self.log("+================================================+", "INFO")
-                self.log("|  ETAPA 2.5: CONCATENAR INTRO + VIDEO PRINCIPAL|", "ENGINE")
-                self.log("+================================================+", "INFO")
-                
-                # Aplicar overlay no backlog intro primeiro (se overlay estiver configurado)
-                backlog_with_overlay = backlog_intro
-                if config.get("overlay_path") and os.path.exists(config["overlay_path"]):
-                    self.log("Aplicando overlay no intro do backlog...", "INFO")
-                    backlog_overlay_path = os.path.join(temp_dir, "backlog_intro_overlay.mp4")
-                    result_overlay = self.apply_overlay(
-                        backlog_intro,
-                        config["overlay_path"],
-                        backlog_overlay_path,
-                        config.get("overlay_opacity", 0.3)
-                    )
-                    if result_overlay:
-                        backlog_with_overlay = backlog_overlay_path
-                        self.log("Overlay aplicado no intro do backlog!", "OK")
-                
-                # Concatenar intro com vídeo principal usando crossfade
-                # Usar current_video que funciona em ambos os modos (SRT e tradicional)
-                main_video = current_video if use_srt_based else video_stitched
-                video_with_intro = os.path.join(temp_dir, "with_intro.mp4")
-                use_gpu = self.check_gpu_available()
-                
-                # Criar arquivo de lista para concat
-                concat_list_path = os.path.join(temp_dir, "intro_concat_list.txt")
-                with open(concat_list_path, 'w', encoding='utf-8') as f:
-                    # Escapar caminhos para Windows
-                    safe_intro = backlog_with_overlay.replace('\\', '/').replace("'", "'\\''")
-                    safe_video = main_video.replace('\\', '/').replace("'", "'\\''")
-                    f.write(f"file '{safe_intro}'\n")
-                    f.write(f"file '{safe_video}'\n")
-                
-                # Usar filter_complex para crossfade entre intro e vídeo principal
-                intro_duration = self.get_video_duration(backlog_with_overlay)
-                if intro_duration is None:
-                    intro_duration = 48.0  # Fallback: 6 vídeos * 8s
-                
-                transition_dur = config.get("backlog_transition_duration", 0.5)
-                xfade_offset = max(0, intro_duration - transition_dur)
-                
-                encoder_args = self.get_encoder_args(config, use_gpu)
-                
-                # Tentar usar xfade para transição suave
-                filter_complex = (
-                    f"[0:v]setpts=PTS-STARTPTS[v0];"
-                    f"[1:v]setpts=PTS-STARTPTS[v1];"
-                    f"[v0][v1]xfade=transition=fade:duration={transition_dur}:offset={xfade_offset}[vout];"
-                    f"[0:a][1:a]acrossfade=d={transition_dur}[aout]"
-                )
-                
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", backlog_with_overlay,
-                    "-i", main_video,
-                    "-filter_complex", filter_complex,
-                    "-map", "[vout]",
-                    "-map", "[aout]",
-                    *encoder_args,
-                    "-c:a", "aac", "-b:a", "192k",
-                    "-pix_fmt", "yuv420p",
-                    video_with_intro
-                ]
-                
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                )
-                
-                if result.returncode != 0:
-                    # Fallback: concat simples sem crossfade
-                    self.log("Erro no crossfade intro, tentando concatenação simples...", "WARN")
-                    fallback_encoder = self.get_encoder_args(config, use_gpu=False)
-                    cmd_simple = [
-                        "ffmpeg", "-y",
-                        "-f", "concat", "-safe", "0",
-                        "-i", concat_list_path,
-                    ] + fallback_encoder + [
-                        "-c:a", "aac", "-b:a", "192k",
-                        "-pix_fmt", "yuv420p",
-                        video_with_intro
-                    ]
-                    result = subprocess.run(
-                        cmd_simple,
-                        capture_output=True,
-                        text=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-                    )
-                    
-                    if result.returncode != 0:
-                        self.log(f"Erro ao concatenar intro: {result.stderr[-300:] if result.stderr else ''}", "WARN")
-                        # Continuar sem intro se falhar - manter o vídeo original
-                        pass
-                    else:
-                        current_video = video_with_intro
-                        if not use_srt_based:
-                            video_stitched = video_with_intro
-                        self.log("Intro concatenada com sucesso!", "OK")
-                else:
-                    current_video = video_with_intro
-                    if not use_srt_based:
-                        video_stitched = video_with_intro
-                    self.log("Intro concatenada com crossfade!", "OK")
-
             # ETAPA 3: Overlay (opcional) - OTIMIZAÇÃO: Overlay já foi aplicado nas células individuais!
             # No modo tradicional e SRT, overlay é aplicado DURANTE a renderização:
             # - Modo SRT: render_image_with_animation() aplica overlay em cada célula
             # - Modo tradicional: generate_zoom_clip() aplica overlay em cada clip
             # Isso é MUITO mais rápido porque processa células pequenas em vez do vídeo inteiro
-            # Só precisamos aplicar overlay aqui no vídeo final se há backlog intro
             # Garantir que current_video está definido corretamente
             if not use_srt_based:
-                # No modo tradicional, current_video pode não ter sido atualizado se não houve backlog
-                if not backlog_intro or not os.path.exists(backlog_intro):
-                    current_video = video_stitched
+                current_video = video_stitched
             
             overlay_path = config.get("overlay_path", "")
             has_overlay = overlay_path and os.path.exists(overlay_path)
-            backlog_has_overlay = backlog_intro and os.path.exists(backlog_intro) and has_overlay
             
             if has_overlay:
                 # Overlay foi aplicado nas células individuais (muito mais rápido!)
                 self.log("Overlay já aplicado nas células individuais (otimizado - muito mais rápido)!", "OK")
-            
-            # Só aplicar overlay no vídeo principal se há backlog intro sem overlay
-            # (geralmente não é necessário porque overlay já está nas células)
-            if backlog_has_overlay:
-                # Backlog intro já tem overlay - vídeo principal também já tem (nas células)
-                self.log("Overlay aplicado no intro do backlog e nas células do vídeo principal!", "OK")
 
             # ETAPA 3.5: PREPARAÇÃO VSL - Detectar palavra-chave e preparar dados
             # A inserção real do VSL acontece DEPOIS das legendas (para ficar por cima)
@@ -3743,6 +4034,25 @@ class SubtitleEngine:
         s = (ms % 60000) // 1000
         cs = (ms % 1000) // 10
         return f"{h}:{m:02}:{s:02}.{cs:02}"
+    
+    def _ass_time_to_srt_time(self, ass_time):
+        """Converte formato ASS (H:MM:SS.CC) para formato SRT (HH:MM:SS,mmm)."""
+        try:
+            # Formato ASS: H:MM:SS.CC (ex: 0:00:05.25)
+            parts = ass_time.split(':')
+            if len(parts) == 3:
+                h = int(parts[0])
+                m = int(parts[1])
+                s_parts = parts[2].split('.')
+                s = int(s_parts[0])
+                cs = int(s_parts[1]) if len(s_parts) > 1 else 0
+                # Converter centissegundos para milissegundos
+                ms_total = cs * 10
+                # Formato SRT: HH:MM:SS,mmm
+                return f"{h:02d}:{m:02d}:{s:02d},{ms_total:03d}"
+            return "00:00:00,000"
+        except Exception:
+            return "00:00:00,000"
 
     def hex_to_ass_color(self, hex_color):
         """Converte cor hex RGB para formato ASS BGR."""
@@ -3922,6 +4232,49 @@ class VSLEngine:
         except Exception as e:
             self.log(f"Erro ao obter resolução do vídeo: {e}", "ERROR")
             return None
+
+    def check_gpu_available(self):
+        """Verifica se GPU está disponível para encoding."""
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            )
+            return "h264_nvenc" in result.stdout or "h264_qsv" in result.stdout
+        except:
+            return False
+
+    def get_encoder_args(self, config, use_gpu=None):
+        """Retorna os argumentos do encoder baseado na configuração de bitrate.
+        
+        Args:
+            config: Dicionário de configuração com 'video_bitrate'
+            use_gpu: Se None, usa self.check_gpu_available()
+        
+        Returns:
+            Lista de argumentos para o encoder FFmpeg
+        """
+        if use_gpu is None:
+            use_gpu = self.check_gpu_available()
+        
+        bitrate = config.get("video_bitrate", "4M")
+        crf = config.get("video_crf", 23)
+        
+        if use_gpu:
+            if bitrate == "auto":
+                # Modo CRF para GPU (usa -cq em vez de -b:v)
+                return ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", str(crf)]
+            else:
+                return ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", bitrate]
+        else:
+            if bitrate == "auto":
+                # Modo CRF para CPU
+                return ["-c:v", "libx264", "-preset", "fast", "-crf", str(crf)]
+            else:
+                # Modo bitrate fixo para CPU (usa -b:v com maxrate/bufsize)
+                return ["-c:v", "libx264", "-preset", "fast", "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{int(bitrate[:-1])*2}M"]
 
     def insert_vsl(self, video_path, vsl_path, start_time_sec, output_path, use_gpu=False):
         """
@@ -4920,19 +5273,35 @@ class FinalSlideshowApp(ctk.CTk):
         # Range aleatório para VSL (em minutos)
         self.vsl_range_start_var = ctk.StringVar(value=str(self.config.get("vsl_range_start_min", 1.0)))
         self.vsl_range_end_var = ctk.StringVar(value=str(self.config.get("vsl_range_end_min", 3.0)))
-        # Backlog Videos
-        self.use_backlog_videos_var = ctk.BooleanVar(value=self.config.get("use_backlog_videos", False))
-        backlog_folder_default = self.config.get("backlog_folder", str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS"))
-        self.backlog_folder_var = ctk.StringVar(value=backlog_folder_default)
-        self.backlog_status_var = ctk.StringVar(value="Verificando...")
+        # Modo Backlog Completo
+        # Verificar se video_mode é "backlog" para ativar automaticamente
+        video_mode_from_config = self.config.get("video_mode", "traditional")
+        # Se video_mode == "backlog", garantir que use_backlog_mode seja True
+        use_backlog_mode_from_config = self.config.get("use_backlog_mode", False) or (video_mode_from_config == "backlog")
+        self.use_backlog_mode_var = ctk.BooleanVar(value=use_backlog_mode_from_config)
+        backlog_mode_folder_default = self.config.get("backlog_folder", str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS"))
+        # Se modo backlog completo estava ativo antes, usar sua pasta específica se configurada
+        if use_backlog_mode_from_config:
+            backlog_mode_folder_default = self.config.get("backlog_folder", backlog_mode_folder_default)
+        self.backlog_mode_folder_var = ctk.StringVar(value=backlog_mode_folder_default)
+        self.backlog_mode_status_var = ctk.StringVar(value="Verificando...")
         
-        # Modo de Vídeo: "traditional", "srt", "single_image"
+        # Personagem Principal
+        self.use_character_var = ctk.BooleanVar(value=self.config.get("use_character", False))
+        self.character_path_var = ctk.StringVar(value=self.config.get("character_path", ""))
+        self.character_position_var = ctk.StringVar(value=self.config.get("character_position", "right"))
+        
+        # Modo de Vídeo: "traditional", "srt", "single_image", "backlog"
         # Converter valor antigo (bool) para novo formato (string)
         old_srt_value = self.config.get("use_srt_based_images", False)
         video_mode_default = self.config.get("video_mode", "traditional")
         if video_mode_default == "traditional" and old_srt_value:
             video_mode_default = "srt"
         self.video_mode_var = ctk.StringVar(value=video_mode_default)
+        
+        # Se video_mode for "backlog", garantir que use_backlog_mode_var seja True
+        if video_mode_default == "backlog":
+            self.use_backlog_mode_var.set(True)
         self.image_source_var = ctk.StringVar(value=self.config.get("image_source", "generate"))
         self.images_backlog_folder_var = ctk.StringVar(value=self.config.get("images_backlog_folder", ""))
         # Tokens Whisk agora são carregados do arquivo whisk_keys.json
@@ -5109,18 +5478,24 @@ class FinalSlideshowApp(ctk.CTk):
             "vsl_folder": self.config.get("vsl_folder", str(SCRIPT_DIR / "EFEITOS" / "VSLs")),
             "vsl_keywords_file": self.config.get("vsl_keywords_file", str(SCRIPT_DIR / "vsl_keywords.json")),
             "vsl_language": self.vsl_language_var.get() if hasattr(self, 'vsl_language_var') else "portugues",
+            "vsl_fallback_language": self.vsl_language_var.get() if hasattr(self, 'vsl_language_var') else "portugues",
             "selected_vsl": self.selected_vsl_var.get() if hasattr(self, 'selected_vsl_var') else "",
             "vsl_insertion_mode": self.vsl_insertion_mode_var.get() if hasattr(self, 'vsl_insertion_mode_var') else "keyword",
+            "vsl_insertion_method": self.vsl_insertion_mode_var.get() if hasattr(self, 'vsl_insertion_mode_var') else "keyword",  # Alias para compatibilidade
             "vsl_fixed_position": self.vsl_fixed_position_var.get() if hasattr(self, 'vsl_fixed_position_var') else 60.0,
-            "vsl_range_start_min": float(self.vsl_range_start_var.get()) if hasattr(self, 'vsl_range_start_var') else 1.0,
-            "vsl_range_end_min": float(self.vsl_range_end_var.get()) if hasattr(self, 'vsl_range_end_var') else 3.0,
-            # Backlog Videos
-            "use_backlog_videos": self.use_backlog_videos_var.get(),
-            "backlog_folder": self.backlog_folder_var.get(),
-            "backlog_video_count": self.config.get("backlog_video_count", 6),
-            "backlog_audio_volume": self.config.get("backlog_audio_volume", 0.25),
-            "backlog_transition_duration": self.config.get("backlog_transition_duration", 0.5),
-            "backlog_fade_out_duration": self.config.get("backlog_fade_out_duration", 1.0),
+            "vsl_range_start_min": float(self.vsl_range_start_var.get()) if hasattr(self, 'vsl_range_start_var') else 5.0,
+            "vsl_range_end_min": float(self.vsl_range_end_var.get()) if hasattr(self, 'vsl_range_end_var') else 8.0,
+            # Modo Backlog Completo (cobre toda duração do áudio)
+            "use_backlog_mode": self.use_backlog_mode_var.get() if hasattr(self, 'use_backlog_mode_var') else False,
+            # Se modo backlog completo estiver ativo, usar sua pasta; senão manter pasta do intro
+            # O render_with_backlog_videos usa config.get("backlog_folder")
+            "backlog_folder": self.backlog_mode_folder_var.get() if (hasattr(self, 'backlog_mode_folder_var') and self.video_mode_var.get() == "backlog") else self.config.get("backlog_folder", str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS")),
+            "backlog_used_folder": self.config.get("backlog_used_folder", "USADOS"),
+            "backlog_cache_file": self.config.get("backlog_cache_file", "backlog_cache.json"),
+            # Personagem Principal
+            "use_character": self.use_character_var.get() if hasattr(self, 'use_character_var') else False,
+            "character_path": self.character_path_var.get() if hasattr(self, 'character_path_var') else "",
+            "character_position": self.character_position_var.get() if hasattr(self, 'character_position_var') else "right",
             # Modo de Vídeo
             "video_mode": self.video_mode_var.get(),
             "use_srt_based_images": self.video_mode_var.get() == "srt",  # Compatibilidade
@@ -5563,6 +5938,20 @@ class FinalSlideshowApp(ctk.CTk):
             fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
             command=self.toggle_video_mode
         ).pack(anchor="w", pady=(5, 0))
+        
+        ctk.CTkRadioButton(
+            mode_frame, text="Usar Vídeos Backlog para Todo Vídeo",
+            variable=self.video_mode_var, value="backlog",
+            fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
+            command=self.toggle_video_mode
+        ).pack(anchor="w", pady=(5, 0))
+        
+        ctk.CTkLabel(
+            mode_frame,
+            text="(Vídeos do backlog cobrem toda duração do áudio, sem imagens)",
+            text_color=CORES["text_dim"],
+            font=ctk.CTkFont(size=10)
+        ).pack(anchor="w", padx=(25, 0), pady=(2, 0))
 
         # ===== CONFIGURAÇÕES COMUNS =====
         common_frame = ctk.CTkFrame(section, fg_color="transparent")
@@ -6001,11 +6390,55 @@ class FinalSlideshowApp(ctk.CTk):
             text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
         ).pack(anchor="w", padx=10, pady=(5, 10))
 
+        # ===== PAINEL MODO BACKLOG COMPLETO =====
+        self.backlog_mode_frame_video = ctk.CTkFrame(section, fg_color=CORES["bg_dark"], corner_radius=8)
+        
+        ctk.CTkLabel(
+            self.backlog_mode_frame_video, text="Opções do Modo Backlog Completo",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=CORES["text_dim"]
+        ).pack(anchor="w", padx=10, pady=(10, 5))
+        
+        # Descrição
+        ctk.CTkLabel(
+            self.backlog_mode_frame_video,
+            text="Vídeos do backlog são concatenados sem transições para cobrir toda duração do áudio",
+            text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
+        ).pack(anchor="w", padx=10, pady=(0, 10))
+        
+        # Frame de pasta do backlog
+        backlog_pasta_frame = ctk.CTkFrame(self.backlog_mode_frame_video, fg_color="transparent")
+        backlog_pasta_frame.grid_columnconfigure(1, weight=1)
+        backlog_pasta_frame.pack(fill="x", padx=10, pady=5)
+        
+        ctk.CTkLabel(backlog_pasta_frame, text="Pasta do Backlog:", text_color=CORES["text"]).grid(
+            row=0, column=0, sticky="w", padx=(0, 5), pady=5)
+        ctk.CTkEntry(backlog_pasta_frame, textvariable=self.backlog_mode_folder_var,
+                    fg_color=CORES["bg_input"], border_color=CORES["accent"]).grid(
+            row=0, column=1, sticky="ew", padx=5, pady=5)
+        ctk.CTkButton(backlog_pasta_frame, text="...", width=40, fg_color=CORES["accent"],
+                     command=self.select_backlog_mode_folder).grid(row=0, column=2, padx=5, pady=5)
+        
+        # Status do backlog
+        status_backlog_video_frame = ctk.CTkFrame(self.backlog_mode_frame_video, fg_color="transparent")
+        status_backlog_video_frame.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(status_backlog_video_frame, text="Status:", text_color=CORES["text_dim"]).pack(side="left")
+        self.backlog_mode_status_label_video = ctk.CTkLabel(status_backlog_video_frame, textvariable=self.backlog_mode_status_var,
+                                                      text_color=CORES["text"])
+        self.backlog_mode_status_label_video.pack(side="left", padx=5)
+        
+        # Info sobre pasta USADOS
+        ctk.CTkLabel(
+            self.backlog_mode_frame_video,
+            text="(Vídeos usados são movidos automaticamente para pasta USADOS)",
+            text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
+        ).pack(anchor="w", padx=10, pady=(0, 10))
+
         # Mostrar painel correto
         self.toggle_video_mode()
 
     def toggle_video_mode(self):
-        """Alterna entre modo tradicional, Pipeline SRT e Modo 1 Imagem."""
+        """Alterna entre modo tradicional, Pipeline SRT, Modo 1 Imagem e Modo Backlog Completo."""
         mode = self.video_mode_var.get()
         
         # Esconder todos os painéis
@@ -6013,6 +6446,35 @@ class FinalSlideshowApp(ctk.CTk):
         self.srt_mode_frame.pack_forget()
         if hasattr(self, 'single_image_mode_frame'):
             self.single_image_mode_frame.pack_forget()
+        if hasattr(self, 'backlog_mode_frame_video'):
+            self.backlog_mode_frame_video.pack_forget()
+        
+        # Atualizar use_backlog_mode_var automaticamente baseado no modo selecionado
+        if mode == "backlog":
+            # Modo backlog completo ativado
+            if hasattr(self, 'use_backlog_mode_var'):
+                self.use_backlog_mode_var.set(True)
+            if hasattr(self, 'backlog_mode_frame_video'):
+                self.backlog_mode_frame_video.pack(fill="x", padx=15, pady=(5, 10))
+                # Configurar trace para atualizar status quando pasta mudar
+                if hasattr(self, 'backlog_mode_folder_var'):
+                    try:
+                        # Remover trace anterior se existir
+                        if hasattr(self, '_backlog_mode_trace_id'):
+                            try:
+                                self.backlog_mode_folder_var.trace_remove("write", self._backlog_mode_trace_id)
+                            except:
+                                pass
+                        # Adicionar novo trace
+                        self._backlog_mode_trace_id = self.backlog_mode_folder_var.trace_add("write", lambda *args: self.update_backlog_mode_status())
+                    except:
+                        pass
+                # Atualizar status imediatamente
+                self.update_backlog_mode_status()
+        else:
+            # Outros modos - desativar modo backlog completo
+            if hasattr(self, 'use_backlog_mode_var'):
+                self.use_backlog_mode_var.set(False)
         
         if mode == "srt":
             self.srt_mode_frame.pack(fill="x", padx=15, pady=(5, 10))
@@ -6020,6 +6482,9 @@ class FinalSlideshowApp(ctk.CTk):
         elif mode == "single_image":
             if hasattr(self, 'single_image_mode_frame'):
                 self.single_image_mode_frame.pack(fill="x", padx=15, pady=(5, 10))
+        elif mode == "backlog":
+            # Já tratado acima
+            pass
         else:  # traditional
             self.traditional_mode_frame.pack(fill="x", padx=15, pady=(5, 10))
             self.toggle_zoom_options()
@@ -6704,14 +7169,15 @@ class FinalSlideshowApp(ctk.CTk):
         self.overlay_options_frame = ctk.CTkFrame(section, fg_color="transparent")
         self.overlay_options_frame.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(self.overlay_options_frame, text="Pasta de Overlays:", text_color=CORES["text"]).grid(
+        # Arquivo de Overlay (único arquivo selecionado)
+        ctk.CTkLabel(self.overlay_options_frame, text="Arquivo de Overlay:", text_color=CORES["text"]).grid(
             row=0, column=0, sticky="w", padx=(15, 5), pady=5)
-        ctk.CTkEntry(self.overlay_options_frame, textvariable=self.overlay_folder_var,
+        ctk.CTkEntry(self.overlay_options_frame, textvariable=self.overlay_var,
                     fg_color=CORES["bg_input"], border_color=CORES["accent"],
-                    placeholder_text="PNG ou vídeos MP4/MOV").grid(
+                    placeholder_text="PNG ou MP4/MOV").grid(
             row=0, column=1, sticky="ew", padx=5, pady=5)
         ctk.CTkButton(self.overlay_options_frame, text="...", width=40, fg_color=CORES["accent"],
-                     command=self.select_overlay_folder).grid(row=0, column=2, padx=5, pady=5)
+                     command=self.select_overlay_file).grid(row=0, column=2, padx=5, pady=5)
 
         # Slider de opacidade em frame separado para evitar conflito pack/grid
         opacity_frame = ctk.CTkFrame(self.overlay_options_frame, fg_color="transparent")
@@ -6720,7 +7186,7 @@ class FinalSlideshowApp(ctk.CTk):
 
         ctk.CTkLabel(
             self.overlay_options_frame,
-            text="(1 overlay por vídeo, rotação automática entre os disponíveis)",
+            text="(Overlay único aplicado sobre todo o vídeo - PNG estático ou MP4 em loop)",
             text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
         ).grid(row=2, column=0, columnspan=3, sticky="w", padx=15, pady=(0, 5))
 
@@ -6932,38 +7398,60 @@ class FinalSlideshowApp(ctk.CTk):
         if self.use_vsl_var.get():
             self.vsl_selector_frame.pack(fill="x", pady=(0, 5))
 
-        # ===== VÍDEOS INTRODUTÓRIOS =====
-        intro_check = ctk.CTkCheckBox(
-            section, text="Usar Vídeos Introdutórios (backlog de intros)",
-            variable=self.use_backlog_videos_var,
+        # ===== PERSONAGEM PRINCIPAL =====
+        character_check = ctk.CTkCheckBox(
+            section, text="Adicionar Personagem Principal",
+            variable=self.use_character_var,
             fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
             text_color=CORES["text"],
-            command=self.toggle_intro_videos
+            command=self.toggle_character_options
         )
-        intro_check.pack(anchor="w", padx=15, pady=5)
+        character_check.pack(anchor="w", padx=15, pady=5)
 
-        # Frame de intros
-        self.intro_videos_frame = ctk.CTkFrame(section, fg_color="transparent")
-        self.intro_videos_frame.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            section,
+            text="(Personagem PNG ou MP4 sobreposto ao vídeo)",
+            text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
+        ).pack(anchor="w", padx=30)
 
-        ctk.CTkLabel(self.intro_videos_frame, text="Pasta de Intros:", text_color=CORES["text"]).grid(
+        # Frame de personagem
+        self.character_frame = ctk.CTkFrame(section, fg_color="transparent")
+        self.character_frame.grid_columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(self.character_frame, text="Arquivo do Personagem:", text_color=CORES["text"]).grid(
             row=0, column=0, sticky="w", padx=(15, 5), pady=5)
-        ctk.CTkEntry(self.intro_videos_frame, textvariable=self.backlog_folder_var,
-                    fg_color=CORES["bg_input"], border_color=CORES["accent"]).grid(
+        ctk.CTkEntry(self.character_frame, textvariable=self.character_path_var,
+                    fg_color=CORES["bg_input"], border_color=CORES["accent"],
+                    placeholder_text="PNG ou MP4").grid(
             row=0, column=1, sticky="ew", padx=5, pady=5)
-        ctk.CTkButton(self.intro_videos_frame, text="...", width=40, fg_color=CORES["accent"],
-                     command=self.select_backlog_folder).grid(row=0, column=2, padx=5, pady=5)
+        ctk.CTkButton(self.character_frame, text="...", width=40, fg_color=CORES["accent"],
+                     command=self.select_character_file).grid(row=0, column=2, padx=5, pady=5)
 
-        # Status
-        status_row = ctk.CTkFrame(self.intro_videos_frame, fg_color="transparent")
-        status_row.grid(row=1, column=0, columnspan=3, sticky="w", padx=15, pady=5)
-        ctk.CTkLabel(status_row, text="Status:", text_color=CORES["text_dim"]).pack(side="left")
-        self.backlog_status_label = ctk.CTkLabel(status_row, textvariable=self.backlog_status_var,
-                                                 text_color=CORES["text"])
-        self.backlog_status_label.pack(side="left", padx=5)
+        # Posição do personagem
+        position_row = ctk.CTkFrame(self.character_frame, fg_color="transparent")
+        position_row.grid(row=1, column=0, columnspan=3, sticky="w", padx=15, pady=5)
+        ctk.CTkLabel(position_row, text="Posição:", text_color=CORES["text"]).pack(side="left", padx=(0, 5))
+        
+        ctk.CTkRadioButton(
+            position_row, text="Centro", variable=self.character_position_var,
+            value="center", fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
+            text_color=CORES["text"]
+        ).pack(side="left", padx=(0, 10))
+        
+        ctk.CTkRadioButton(
+            position_row, text="Esquerdo", variable=self.character_position_var,
+            value="left", fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
+            text_color=CORES["text"]
+        ).pack(side="left", padx=(0, 10))
+        
+        ctk.CTkRadioButton(
+            position_row, text="Direito", variable=self.character_position_var,
+            value="right", fg_color=CORES["accent"], hover_color=CORES["accent_hover"],
+            text_color=CORES["text"]
+        ).pack(side="left")
 
-        if self.use_backlog_videos_var.get():
-            self.intro_videos_frame.pack(fill="x")
+        if self.use_character_var.get():
+            self.character_frame.pack(fill="x", pady=(0, 5))
 
         # Espaço final
         ctk.CTkFrame(section, fg_color="transparent", height=10).pack()
@@ -6974,20 +7462,6 @@ class FinalSlideshowApp(ctk.CTk):
             self.overlay_options_frame.pack(fill="x")
         else:
             self.overlay_options_frame.pack_forget()
-
-    def toggle_intro_videos(self):
-        """Mostra/oculta opções de vídeos introdutórios."""
-        if self.use_backlog_videos_var.get():
-            self.intro_videos_frame.pack(fill="x")
-            self.update_backlog_status()
-        else:
-            self.intro_videos_frame.pack_forget()
-        
-        # Atualizar status quando pasta mudar
-        self.backlog_folder_var.trace_add("write", lambda *args: self.update_backlog_status())
-        
-        # Atualizar status inicial
-        self.update_backlog_status()
 
     def toggle_vsl_selector(self):
         """Mostra/oculta seletor de VSL."""
@@ -7269,8 +7743,24 @@ class FinalSlideshowApp(ctk.CTk):
             self.prompt_file_var.set(file_path)
             self.save_config()
 
+    def select_overlay_file(self):
+        """Abre dialog para selecionar arquivo de overlay (PNG ou MP4)."""
+        file_path = filedialog.askopenfilename(
+            title="Selecionar Arquivo de Overlay",
+            filetypes=[
+                ("Todos os formatos", "*.png *.jpg *.jpeg *.mp4 *.mov *.avi *.mkv *.webm"),
+                ("Imagens", "*.png *.jpg *.jpeg"),
+                ("Vídeos", "*.mp4 *.mov *.avi *.mkv *.webm"),
+                ("Todos os arquivos", "*.*")
+            ],
+            initialdir=os.path.dirname(self.overlay_var.get()) if self.overlay_var.get() else str(SCRIPT_DIR / "EFEITOS")
+        )
+        if file_path:
+            self.overlay_var.set(file_path)
+            self.log(f"Overlay selecionado: {os.path.basename(file_path)}", "INFO")
+    
     def select_overlay_folder(self):
-        """Abre dialog para selecionar pasta de overlays."""
+        """Abre dialog para selecionar pasta de overlays (método antigo, mantido para compatibilidade)."""
         folder = filedialog.askdirectory(
             title="Selecionar Pasta de Overlays",
             initialdir=self.overlay_folder_var.get() if self.overlay_folder_var.get() else str(SCRIPT_DIR)
@@ -7297,24 +7787,46 @@ class FinalSlideshowApp(ctk.CTk):
         if folder:
             self.audio_backlog_folder_var.set(folder)
 
-    def select_backlog_folder(self):
-        """Abre dialog para selecionar pasta do backlog."""
+    def toggle_backlog_mode_options(self):
+        """Mostra/oculta opções do modo backlog completo.
+        Nota: Este método não é mais usado porque o modo backlog agora está na seção de modo de vídeo.
+        Mantido para compatibilidade."""
+        # O modo backlog agora é controlado pelo toggle_video_mode
+        # Este método não faz mais nada, mas é mantido para compatibilidade
+        if hasattr(self, 'backlog_mode_frame_video'):
+            # Se o frame do modo backlog de vídeo existir, atualizar status
+            if hasattr(self, 'update_backlog_mode_status'):
+                self.update_backlog_mode_status()
+        
+        # Atualizar status quando pasta mudar
+        self.backlog_mode_folder_var.trace_add("write", lambda *args: self.update_backlog_mode_status())
+        
+        # Atualizar status inicial
+        self.update_backlog_mode_status()
+
+    def select_backlog_mode_folder(self):
+        """Abre dialog para selecionar pasta do backlog (modo completo)."""
         folder = filedialog.askdirectory(
             title="Selecionar Pasta do Backlog de Vídeos",
-            initialdir=self.backlog_folder_var.get() if self.backlog_folder_var.get() else str(SCRIPT_DIR)
+            initialdir=self.backlog_mode_folder_var.get() if self.backlog_mode_folder_var.get() else str(SCRIPT_DIR)
         )
         if folder:
-            self.backlog_folder_var.set(folder)
-            self.update_backlog_status()
+            self.backlog_mode_folder_var.set(folder)
+            self.update_backlog_mode_status()
 
-    def update_backlog_status(self):
-        """Atualiza status dos videos do backlog."""
-        if not self.use_backlog_videos_var.get():
-            self.backlog_status_var.set("Desabilitado")
-            self.backlog_status_label.configure(text_color=CORES["text_dim"])
+    def update_backlog_mode_status(self):
+        """Atualiza status dos vídeos do backlog (modo completo, ignorando pasta USADOS)."""
+        # Verificar se modo backlog está ativo (via video_mode ou use_backlog_mode_var)
+        video_mode = self.video_mode_var.get() if hasattr(self, 'video_mode_var') else "traditional"
+        use_backlog_mode = (video_mode == "backlog") or (hasattr(self, 'use_backlog_mode_var') and self.use_backlog_mode_var.get())
+        
+        if not use_backlog_mode:
+            if hasattr(self, 'backlog_mode_status_label_video'):
+                self.backlog_mode_status_var.set("Desabilitado")
+                self.backlog_mode_status_label_video.configure(text_color=CORES["text_dim"])
             return
         
-        backlog_folder = self.backlog_folder_var.get()
+        backlog_folder = self.backlog_mode_folder_var.get()
         if not backlog_folder:
             backlog_folder = self.config.get("backlog_folder", str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS"))
         
@@ -7322,28 +7834,57 @@ class FinalSlideshowApp(ctk.CTk):
             backlog_folder = str(SCRIPT_DIR / backlog_folder)
         
         if not os.path.exists(backlog_folder):
-            self.backlog_status_var.set("Pasta não encontrada")
-            self.backlog_status_label.configure(text_color=CORES["error"])
+            if hasattr(self, 'backlog_mode_status_label_video'):
+                self.backlog_mode_status_var.set("Pasta não encontrada")
+                self.backlog_mode_status_label_video.configure(text_color=CORES["error"])
             return
         
-        # Contar videos
+        # Contar vídeos (ignorando pasta USADOS)
         video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.webm')
         video_count = 0
+        used_folder = os.path.join(backlog_folder, "USADOS")
+        
         try:
             for f in os.listdir(backlog_folder):
                 full_path = os.path.join(backlog_folder, f)
+                # Ignorar diretórios (especialmente USADOS)
+                if os.path.isdir(full_path):
+                    continue
                 if os.path.isfile(full_path) and f.lower().endswith(video_extensions):
                     video_count += 1
-        except:
-            pass
+        except Exception as e:
+            self.log(f"Erro ao contar vídeos do backlog: {e}", "WARN")
         
-        required = self.config.get("backlog_video_count", 6)
-        if video_count >= required:
-            self.backlog_status_var.set(f"{video_count} videos disponíveis (OK)")
-            self.backlog_status_label.configure(text_color=CORES["success"])
+        if hasattr(self, 'backlog_mode_status_label_video'):
+            if video_count > 0:
+                self.backlog_mode_status_var.set(f"{video_count} vídeos disponíveis")
+                self.backlog_mode_status_label_video.configure(text_color=CORES["success"])
+            else:
+                self.backlog_mode_status_var.set("Nenhum vídeo disponível")
+                self.backlog_mode_status_label_video.configure(text_color=CORES["warning"])
+
+    def toggle_character_options(self):
+        """Mostra/oculta opções de personagem."""
+        if self.use_character_var.get():
+            self.character_frame.pack(fill="x", pady=(0, 5))
         else:
-            self.backlog_status_var.set(f"{video_count} videos (mínimo: {required})")
-            self.backlog_status_label.configure(text_color=CORES["warning"])
+            self.character_frame.pack_forget()
+
+    def select_character_file(self):
+        """Abre dialog para selecionar arquivo do personagem (PNG ou MP4)."""
+        file_path = filedialog.askopenfilename(
+            title="Selecionar Personagem Principal",
+            filetypes=[
+                ("Todos os formatos", "*.png *.jpg *.jpeg *.mp4 *.mov *.avi *.mkv *.webm"),
+                ("Imagens", "*.png *.jpg *.jpeg"),
+                ("Vídeos", "*.mp4 *.mov *.avi *.mkv *.webm"),
+                ("Todos os arquivos", "*.*")
+            ],
+            initialdir=os.path.dirname(self.character_path_var.get()) if self.character_path_var.get() else str(SCRIPT_DIR)
+        )
+        if file_path:
+            self.character_path_var.set(file_path)
+            self.log(f"Personagem selecionado: {os.path.basename(file_path)}", "INFO")
 
     def create_subtitle_customization(self, parent):
         """Cria campos de personalizacao de legendas."""
@@ -8390,9 +8931,14 @@ v2.0 (Versão Base)
         if not self.batch_output_var.get():
             messagebox.showerror("Erro", "Selecione uma pasta de saida!")
             return False
-        if not self.batch_images_var.get() or not os.path.isdir(self.batch_images_var.get()):
-            messagebox.showerror("Erro", "Selecione um banco de imagens valido!")
-            return False
+        
+        # Verificar banco de imagens apenas se não estiver no modo backlog
+        video_mode = self.video_mode_var.get()
+        use_backlog_mode = (video_mode == "backlog") or (hasattr(self, 'use_backlog_mode_var') and self.use_backlog_mode_var.get())
+        if not use_backlog_mode:
+            if not self.batch_images_var.get() or not os.path.isdir(self.batch_images_var.get()):
+                messagebox.showerror("Erro", "Selecione um banco de imagens valido!")
+                return False
 
         # Criar pasta de saida se nao existir
         os.makedirs(self.batch_output_var.get(), exist_ok=True)
@@ -8577,13 +9123,9 @@ v2.0 (Versão Base)
             "vsl_fixed_position": self.vsl_fixed_position_var.get() if hasattr(self, 'vsl_fixed_position_var') else 60.0,
             "vsl_range_start_min": float(self.vsl_range_start_var.get()) if hasattr(self, 'vsl_range_start_var') else 1.0,
             "vsl_range_end_min": float(self.vsl_range_end_var.get()) if hasattr(self, 'vsl_range_end_var') else 3.0,
-            # Backlog Videos
-            "use_backlog_videos": self.use_backlog_videos_var.get(),
-            "backlog_folder": self.backlog_folder_var.get() if self.backlog_folder_var.get() else str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS"),
-            "backlog_video_count": self.config.get("backlog_video_count", 6),
-            "backlog_audio_volume": self.config.get("backlog_audio_volume", 0.25),
-            "backlog_transition_duration": self.config.get("backlog_transition_duration", 0.5),
-            "backlog_fade_out_duration": self.config.get("backlog_fade_out_duration", 1.0),
+            # Overlay (arquivo único selecionado)
+            "overlay_path": self.overlay_var.get() if hasattr(self, 'overlay_var') else "",
+            "overlay_opacity": self.overlay_opacity_var.get() if hasattr(self, 'overlay_opacity_var') else 0.3,
             "text_path": getattr(job, 'txt_path', None),
             # Modo 1 Imagem (Pêndulo)
             "pendulum_amplitude": self.pendulum_amplitude_var.get(),
@@ -8594,7 +9136,18 @@ v2.0 (Versão Base)
             "chroma_similarity": self.chroma_similarity_var.get(),
             "chroma_blend": self.chroma_blend_var.get(),
             # Banco de imagens para modo single_image
-            "batch_images_folder": self.batch_images_var.get()
+            "batch_images_folder": self.batch_images_var.get(),
+            # Modo Backlog Completo
+            "use_backlog_mode": (self.video_mode_var.get() == "backlog") or (hasattr(self, 'use_backlog_mode_var') and self.use_backlog_mode_var.get()),
+            "backlog_folder": self.backlog_mode_folder_var.get() if (hasattr(self, 'backlog_mode_folder_var') and self.video_mode_var.get() == "backlog") else str(SCRIPT_DIR / "EFEITOS" / "BACKLOG_VIDEOS"),
+            "backlog_used_folder": self.config.get("backlog_used_folder", "USADOS"),
+            "backlog_cache_file": self.config.get("backlog_cache_file", "backlog_cache.json"),
+            # Personagem Principal
+            "use_character": self.use_character_var.get() if hasattr(self, 'use_character_var') else False,
+            "character_path": self.character_path_var.get() if hasattr(self, 'character_path_var') else "",
+            "character_position": self.character_position_var.get() if hasattr(self, 'character_position_var') else "right",
+            # VSL - Método de Inserção (compatibilidade com vsl_insertion_mode)
+            "vsl_insertion_method": self.vsl_insertion_mode_var.get() if hasattr(self, 'vsl_insertion_mode_var') else "keyword"
         }
 
     def update_job_progress(self, job, progress):
@@ -8647,16 +9200,26 @@ v2.0 (Versão Base)
                 # Criar pasta de saida
                 os.makedirs(os.path.dirname(job.output_path), exist_ok=True)
 
-                # Reservar imagens exclusivas
-                images_needed = self.images_per_video_var.get()
-                try:
-                    images = self.image_system.reserve_images(images_needed)
-                    job.used_images = images
-                except Exception as e:
-                    job.status = "error"
-                    job.error_msg = str(e)
-                    self.log(f"[Worker {worker_id}] Erro ao reservar imagens: {e}")
-                    continue
+                # Verificar modo de vídeo antes de reservar imagens
+                video_mode = self.video_mode_var.get()
+                use_backlog_mode = (video_mode == "backlog") or (hasattr(self, 'use_backlog_mode_var') and self.use_backlog_mode_var.get())
+                
+                # Reservar imagens exclusivas (apenas se não for modo backlog)
+                images = []
+                if not use_backlog_mode:
+                    images_needed = self.images_per_video_var.get()
+                    try:
+                        images = self.image_system.reserve_images(images_needed)
+                        job.used_images = images
+                    except Exception as e:
+                        job.status = "error"
+                        job.error_msg = str(e)
+                        self.log(f"[Worker {worker_id}] Erro ao reservar imagens: {e}")
+                        continue
+                else:
+                    # Modo backlog não precisa de imagens
+                    job.used_images = []
+                    self.log(f"[Worker {worker_id}] Modo backlog ativo - pulando reserva de imagens", "INFO")
 
                 # Configuracao do video
                 config = self.build_config_for_job(job, images)
@@ -8674,15 +9237,17 @@ v2.0 (Versão Base)
                 if result and os.path.exists(result):
                     job.status = "done"
                     job.end_time = time.time()
-                    # Marcar imagens como usadas
-                    self.image_system.release_and_mark_used(job.used_images)
+                    # Marcar imagens como usadas (apenas se não for modo backlog)
+                    if not use_backlog_mode and job.used_images:
+                        self.image_system.release_and_mark_used(job.used_images)
                     self.log(f"[Worker {worker_id}] Concluido: {job.name} ({job.duration_str})")
                 else:
                     job.status = "error"
                     job.error_msg = "Render falhou"
-                    # Liberar imagens reservadas (nao mover)
-                    with self.image_system.lock:
-                        self.image_system.reserved -= set(job.used_images)
+                    # Liberar imagens reservadas (nao mover) - apenas se não for modo backlog
+                    if not use_backlog_mode and job.used_images:
+                        with self.image_system.lock:
+                            self.image_system.reserved -= set(job.used_images)
                     self.log(f"[Worker {worker_id}] Falhou: {job.name}")
 
             except Exception as e:
@@ -9168,15 +9733,20 @@ v2.0 (Versão Base)
             self.current_video_label.configure(text="Aguardando...")
             return
 
-        # Inicializar sistema de imagens
-        self.image_system = ImageReservationSystem(self.batch_images_var.get())
-
-        # Verificar se ha imagens suficientes (apenas se NÃO estiver no modo de geração de imagens)
+        # Verificar se ha imagens suficientes (apenas se NÃO estiver no modo de geração de imagens ou modo backlog)
         video_mode = self.video_mode_var.get()
         image_source = self.image_source_var.get()
+        use_backlog_mode = (video_mode == "backlog") or (hasattr(self, 'use_backlog_mode_var') and self.use_backlog_mode_var.get())
         
+        # Inicializar sistema de imagens apenas se necessário (não para modo backlog)
+        if not use_backlog_mode:
+            self.image_system = ImageReservationSystem(self.batch_images_var.get())
+        
+        # Se está usando modo backlog, não precisa verificar banco de imagens
+        if use_backlog_mode:
+            self.log("Modo Backlog Completo ativo - imagens não necessárias", "INFO")
         # Se está usando Pipeline SRT com geração de imagens, não precisa verificar banco de imagens
-        if video_mode == "srt" and image_source == "generate":
+        elif video_mode == "srt" and image_source == "generate":
             self.log("Modo Pipeline SRT ativo - imagens serão geradas via API Whisk", "INFO")
         elif video_mode == "single_image":
             self.log("Modo 1 Imagem ativo - será usada 1 imagem aleatória do banco", "INFO")
@@ -9233,8 +9803,8 @@ v2.0 (Versão Base)
             for w in self.workers:
                 w.join()
 
-            # Mover imagens usadas apos todos terminarem
-            if not self.cancel_requested:
+            # Mover imagens usadas apos todos terminarem (apenas se image_system foi inicializado)
+            if not self.cancel_requested and hasattr(self, 'image_system') and self.image_system is not None:
                 moved = self.image_system.move_used_images()
                 self.log(f"Movidas {moved} imagens para UTILIZADAS")
 

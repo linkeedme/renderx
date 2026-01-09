@@ -1449,48 +1449,104 @@ class FinalSlideshowEngine:
             self.log(f"VSL detectada: {vsl_start:.2f}s - {vsl_start + vsl_duration:.2f}s", "INFO")
             self.log("Preservando áudio da VSL durante mixagem...", "INFO")
             
+            # Verificar se o vídeo com VSL existe e tem tamanho válido
+            if not os.path.exists(video_path):
+                self.log(f"ERRO: Vídeo com VSL não encontrado: {video_path}", "ERROR")
+                return None
+            
+            file_size = os.path.getsize(video_path)
+            if file_size < 10000:
+                self.log(f"ERRO: Vídeo com VSL tem tamanho inválido: {file_size} bytes", "ERROR")
+                return None
+            
+            self.log(f"Vídeo com VSL verificado: {file_size / (1024*1024):.2f} MB", "DEBUG")
+            
+            # Verificar se o vídeo tem stream de áudio
+            cmd_check_audio = [
+                "ffprobe", "-v", "error",
+                "-select_streams", "a:0",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0",
+                video_path
+            ]
+            audio_check = subprocess.run(cmd_check_audio, capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+            has_audio_stream = "audio" in audio_check.stdout.lower()
+            
             vsl_end = vsl_start + vsl_duration
+            
+            # IMPORTANTE: 
+            # - A narração (narration_path) SEMPRE existe e é usada para gerar SRT
+            # - A música de fundo é mixada com a narração
+            # - A VSL tem seu próprio áudio que deve ser preservado durante seu intervalo
+            # - O vídeo base (backlog) pode não ter áudio, mas após inserir VSL, o vídeo TEM áudio na parte da VSL
             
             # Estratégia:
             # 1. Criar áudio mixado (narração + música) para a duração total
             # 2. Usar asplit para dividir em duas cópias (FFmpeg não permite usar mesmo stream 2x)
             # 3. Cortar parte1 (0 até vsl_start) e parte2 (de vsl_start em diante)
-            # 4. Extrair áudio da VSL do vídeo (já está embutido)
+            # 4. Extrair áudio da VSL do vídeo (já está embutido na parte da VSL)
             # 5. Concatenar: parte1_mixado + audio_vsl + parte2_mixado
             
-            # Filter complex com asplit para poder usar o stream mixado duas vezes
-            filter_complex = (
-                # Preparar música de fundo com loop e volume
-                f"[2:a]volume={music_volume},aloop=loop=-1:size=2e+09[bg];"
-                # Mixar narração com música de fundo
-                f"[1:a][bg]amix=inputs=2:duration=first[mixed];"
-                # IMPORTANTE: Usar asplit para criar duas cópias do áudio mixado
-                f"[mixed]asplit=2[mixed1][mixed2];"
-                # Parte 1 do áudio mixado (0 até vsl_start)
-                f"[mixed1]atrim=0:{vsl_start},asetpts=PTS-STARTPTS[mix_part1];"
-                # Parte 2 do áudio mixado (de vsl_start em diante - continua após a VSL)
-                f"[mixed2]atrim={vsl_start},asetpts=PTS-STARTPTS[mix_part2];"
-                # Extrair áudio da VSL do vídeo (de vsl_start até vsl_end no vídeo final)
-                f"[0:a]atrim={vsl_start}:{vsl_end},asetpts=PTS-STARTPTS[vsl_audio];"
-                # Concatenar: parte1 + áudio_vsl + parte2
-                f"[mix_part1][vsl_audio][mix_part2]concat=n=3:v=0:a=1[aout]"
-            )
-            
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", video_path,      # Input 0: vídeo com VSL (tem áudio da VSL embutido)
-                "-i", narration_path,  # Input 1: narração
-                "-stream_loop", "-1",
-                "-i", music_path,      # Input 2: música de fundo
-                "-filter_complex", filter_complex,
-                "-map", "0:v",
-                "-map", "[aout]",
-                *encoder_args,
-                "-c:a", "aac", "-b:a", "192k",
-                "-pix_fmt", "yuv420p",
-                "-shortest",
-                output_path
-            ]
+            if has_audio_stream:
+                # Vídeo tem stream de áudio - pode extrair áudio da VSL diretamente
+                filter_complex = (
+                    # Preparar música de fundo com loop e volume
+                    f"[2:a]volume={music_volume},aloop=loop=-1:size=2e+09[bg];"
+                    # Mixar narração com música de fundo
+                    f"[1:a][bg]amix=inputs=2:duration=first[mixed];"
+                    # IMPORTANTE: Usar asplit para criar duas cópias do áudio mixado
+                    f"[mixed]asplit=2[mixed1][mixed2];"
+                    # Parte 1 do áudio mixado (0 até vsl_start) - narração + música
+                    f"[mixed1]atrim=0:{vsl_start},asetpts=PTS-STARTPTS[mix_part1];"
+                    # Parte 2 do áudio mixado (de vsl_start em diante) - continua após a VSL
+                    f"[mixed2]atrim={vsl_start},asetpts=PTS-STARTPTS[mix_part2];"
+                    # Extrair áudio da VSL do vídeo (de vsl_start até vsl_end no vídeo final)
+                    # O vídeo tem silêncio antes/depois da VSL, mas tem áudio durante a VSL
+                    f"[0:a]atrim={vsl_start}:{vsl_end},asetpts=PTS-STARTPTS[vsl_audio];"
+                    # Concatenar: parte1 (narração+música) + áudio_vsl + parte2 (narração+música)
+                    f"[mix_part1][vsl_audio][mix_part2]concat=n=3:v=0:a=1[aout]"
+                )
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", video_path,      # Input 0: vídeo com VSL (tem áudio da VSL embutido)
+                    "-i", narration_path,  # Input 1: narração (SEMPRE existe)
+                    "-stream_loop", "-1",
+                    "-i", music_path,      # Input 2: música de fundo
+                    "-filter_complex", filter_complex,
+                    "-map", "0:v",         # IMPORTANTE: Mapear vídeo do input 0 (com VSL visual)
+                    "-map", "[aout]",
+                    *encoder_args,
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-pix_fmt", "yuv420p",
+                    "-shortest",
+                    output_path
+                ]
+            else:
+                # Vídeo não tem stream de áudio - isso não deveria acontecer se VSL foi inserida corretamente
+                # Mas vamos tratar: o vídeo visual tem a VSL, então vamos preservar o vídeo
+                # e adicionar narração + música normalmente (sem preservar áudio da VSL, pois não existe)
+                self.log("AVISO: Vídeo com VSL não tem stream de áudio - VSL pode não ter sido inserida corretamente", "WARN")
+                self.log("Adicionando narração + música normalmente (VSL visual será preservada, mas sem áudio da VSL)", "WARN")
+                filter_complex = (
+                    f"[2:a]volume={music_volume},aloop=loop=-1:size=2e+09[bg];"
+                    f"[1:a][bg]amix=inputs=2:duration=first[aout]"
+                )
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", video_path,      # Input 0: vídeo com VSL (preservar vídeo visual)
+                    "-i", narration_path,  # Input 1: narração (SEMPRE existe)
+                    "-stream_loop", "-1",
+                    "-i", music_path,      # Input 2: música de fundo
+                    "-filter_complex", filter_complex,
+                    "-map", "0:v",         # IMPORTANTE: Mapear vídeo do input 0 (com VSL visual)
+                    "-map", "[aout]",
+                    *encoder_args,
+                    "-c:a", "aac", "-b:a", "192k",
+                    "-pix_fmt", "yuv420p",
+                    "-shortest",
+                    output_path
+                ]
         else:
             # ============================================================
             # MODO SEM VSL: Mixagem normal
@@ -1513,6 +1569,7 @@ class FinalSlideshowEngine:
                 output_path
             ]
 
+        self.log(f"Executando mixagem de áudio...", "DEBUG")
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -1522,7 +1579,22 @@ class FinalSlideshowEngine:
 
         if result.returncode != 0:
             self.log(f"Erro na mixagem: {result.stderr[-300:] if result.stderr else ''}", "ERROR")
+            # Log completo do erro para debug
+            if result.stderr:
+                self.log(f"Erro completo do FFmpeg: {result.stderr}", "DEBUG")
             return None
+        
+        # Verificar se o arquivo foi criado corretamente
+        if not os.path.exists(output_path):
+            self.log(f"ERRO: Arquivo de saída não foi criado: {output_path}", "ERROR")
+            return None
+        
+        file_size = os.path.getsize(output_path)
+        if file_size < 10000:
+            self.log(f"ERRO: Arquivo de saída tem tamanho inválido: {file_size} bytes", "ERROR")
+            return None
+        
+        self.log(f"Arquivo de saída criado: {file_size / (1024*1024):.2f} MB", "DEBUG")
 
         # Registrar áudio de fundo usado no backlog (se estava usando backlog)
         # Nota: Isso só afeta música de fundo, não áudios de narração
@@ -3068,11 +3140,25 @@ class FinalSlideshowEngine:
                 )
                 
                 if result and os.path.exists(video_with_vsl):
-                    current_video = video_with_vsl
-                    # Armazenar informações para mixagem de áudio
-                    config["vsl_inserted_start"] = vsl_start_sec
-                    config["vsl_inserted_duration"] = vsl_duration
-                    self.log("VSL inserida com sucesso", "OK")
+                    # Verificar se o arquivo tem tamanho válido
+                    file_size = os.path.getsize(video_with_vsl)
+                    if file_size < 10000:  # Menos de 10KB é suspeito
+                        self.log(f"AVISO: Vídeo com VSL tem tamanho suspeito: {file_size} bytes", "WARN")
+                    else:
+                        # Verificar duração do vídeo com VSL
+                        vsl_video_duration = self.get_video_duration(video_with_vsl)
+                        base_duration = self.get_video_duration(current_video)
+                        expected_duration = base_duration + vsl_duration
+                        if vsl_video_duration:
+                            self.log(f"Vídeo com VSL: {vsl_video_duration:.2f}s (esperado: ~{expected_duration:.2f}s)", "DEBUG")
+                            if abs(vsl_video_duration - expected_duration) > 5.0:
+                                self.log(f"AVISO: Duração do vídeo com VSL difere do esperado!", "WARN")
+                        
+                        current_video = video_with_vsl
+                        # Armazenar informações para mixagem de áudio
+                        config["vsl_inserted_start"] = vsl_start_sec
+                        config["vsl_inserted_duration"] = vsl_duration
+                        self.log("VSL inserida com sucesso", "OK")
                 else:
                     self.log("Erro ao inserir VSL, continuando sem VSL", "WARN")
             
@@ -3082,6 +3168,14 @@ class FinalSlideshowEngine:
             
             if music_path and os.path.exists(music_path):
                 self.log("Mixando áudio (narração + música de fundo)...", "INFO")
+                # Verificar se há VSL antes de mixar
+                if config.get("vsl_inserted_start") is not None:
+                    self.log(f"VSL será preservada durante mixagem: {config.get('vsl_inserted_start'):.2f}s - {config.get('vsl_inserted_start') + config.get('vsl_inserted_duration'):.2f}s", "DEBUG")
+                    # Verificar duração do vídeo antes da mixagem
+                    video_duration_before = self.get_video_duration(current_video)
+                    if video_duration_before:
+                        self.log(f"Duração do vídeo antes da mixagem: {video_duration_before:.2f}s", "DEBUG")
+                
                 video_with_audio = os.path.join(temp_dir, "video_final_with_audio.mp4")
                 result = self.mix_audio(
                     current_video, audio_path, music_path, video_with_audio, 
@@ -3089,6 +3183,15 @@ class FinalSlideshowEngine:
                 )
                 
                 if result and os.path.exists(video_with_audio):
+                    # Verificar duração do vídeo após mixagem
+                    video_duration_after = self.get_video_duration(video_with_audio)
+                    if video_duration_after:
+                        self.log(f"Duração do vídeo após mixagem: {video_duration_after:.2f}s", "DEBUG")
+                        if config.get("vsl_inserted_start") is not None:
+                            expected_duration = video_duration_before if video_duration_before else None
+                            if expected_duration and abs(video_duration_after - expected_duration) > 1.0:
+                                self.log(f"AVISO: Duração do vídeo mudou após mixagem! (antes: {expected_duration:.2f}s, depois: {video_duration_after:.2f}s)", "WARN")
+                    
                     current_video = video_with_audio
                     self.log("Áudio mixado com sucesso", "OK")
                 else:
@@ -4398,7 +4501,7 @@ class VSLEngine:
                 
                 # Inputs de silêncio separados para cada parte que precisar
                 # (FFmpeg não permite reutilizar o mesmo stream múltiplas vezes)
-                silence_input_idx = 2
+                # IMPORTANTE: Cada parte que precisa de silêncio precisa de seu próprio input
                 silence_inputs_needed = 0
                 if not base_has_audio:
                     if has_part1:
@@ -4408,7 +4511,8 @@ class VSLEngine:
                 if not vsl_has_audio:
                     silence_inputs_needed += 1
                 
-                # Adicionar inputs de silêncio necessários
+                # Adicionar inputs de silêncio necessários (um para cada parte que precisa)
+                # Se não precisar de nenhum, criar pelo menos 1 para garantir que sempre há um disponível
                 for _ in range(max(1, silence_inputs_needed)):
                     cmd.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
                 
@@ -4492,12 +4596,42 @@ class VSLEngine:
                                                      base_has_audio, encoder_args)
                 
                 # Verificar resultado final
-                if not os.path.exists(output_path) or os.path.getsize(output_path) < 10000:
-                    self.log("Video final nao foi criado corretamente", "ERROR")
+                if not os.path.exists(output_path):
+                    self.log("Video final nao foi criado corretamente (arquivo nao existe)", "ERROR")
                     return None
+                
+                file_size = os.path.getsize(output_path)
+                if file_size < 10000:
+                    self.log(f"Video final nao foi criado corretamente (tamanho invalido: {file_size} bytes)", "ERROR")
+                    return None
+                
+                self.log(f"Video com VSL criado: {file_size / (1024*1024):.2f} MB", "DEBUG")
                 
                 final_duration = self.get_video_duration(output_path)
                 expected_duration = (start_time_sec if has_part1 else 0) + vsl_duration + (base_duration - start_time_sec if has_part2 else 0)
+                
+                if final_duration:
+                    self.log(f"Duracao final: {final_duration:.2f}s (esperado: ~{expected_duration:.2f}s)", "DEBUG")
+                    if abs(final_duration - expected_duration) > 2.0:
+                        self.log(f"AVISO: Duração do vídeo com VSL difere do esperado! (diferença: {abs(final_duration - expected_duration):.2f}s)", "WARN")
+                else:
+                    self.log("AVISO: Não foi possível obter duração do vídeo com VSL", "WARN")
+                
+                # Verificar se o vídeo tem stream de vídeo
+                cmd_check_video = [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=codec_type,width,height",
+                    "-of", "csv=p=0",
+                    output_path
+                ]
+                video_check = subprocess.run(cmd_check_video, capture_output=True, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0)
+                if "video" in video_check.stdout.lower():
+                    self.log(f"Video com VSL verificado: stream de video presente", "DEBUG")
+                else:
+                    self.log("ERRO: Video com VSL não tem stream de video!", "ERROR")
+                    return None
                 
                 self.log(f"VSL inserido com sucesso!", "OK")
                 self.log(f"Duracao final: {final_duration:.2f}s (esperado: ~{expected_duration:.2f}s)", "OK")
@@ -9044,6 +9178,9 @@ v2.0 (Versão Base)
             elif txt_path:
                 # Este será processado em generate_missing_audios()
                 # Não criar job ainda, apenas marcar para geração
+                # IMPORTANTE: Quando há apenas TXT sem áudio, o áudio será gerado via TTS (DARKVI/TALKIFY)
+                # e depois o job será criado na segunda passagem do scan_batch_folder()
+                self.log(f"TXT encontrado sem áudio correspondente: {base_name}.txt (será gerado via TTS)", "DEBUG")
                 pass
 
         return jobs
@@ -9553,11 +9690,13 @@ v2.0 (Versão Base)
                     file_groups[key]["audio_path"] = full_path
 
         # Identificar txts sem áudio
+        # IMPORTANTE: Quando há apenas TXT sem nenhum áudio, este será usado para gerar áudio via TTS
         for (base_name, rel_path_key), group in file_groups.items():
             txt_path = group["txt_path"]
             audio_path = group["audio_path"]
             
             if txt_path and not audio_path:
+                # Verificar se áudio já foi gerado em subpasta de áudios gerados
                 if audio_folder_name:
                     txt_dir = os.path.dirname(txt_path)
                     possible_audio_dir = os.path.join(txt_dir, audio_folder_name)
@@ -9567,6 +9706,8 @@ v2.0 (Versão Base)
                         self.log(f"Áudio já existe em subpasta: {base_name}.mp3", "DEBUG")
                         continue
                 
+                # TXT sem áudio - será gerado via TTS (DARKVI ou TALKIFY)
+                self.log(f"TXT sem áudio encontrado: {base_name}.txt - será gerado via {provider.upper()}", "INFO")
                 txt_files_to_process.append({
                     "txt_path": txt_path,
                     "base_name": base_name,
@@ -9641,7 +9782,9 @@ v2.0 (Versão Base)
                 success = generator.generate_audio(text, voice_id, audio_path, title)
 
                 if success and os.path.exists(audio_path):
-                    self.log(f"[{i}/{total_audios}] Áudio gerado: {base_name}.mp3", "OK")
+                    file_size = os.path.getsize(audio_path)
+                    self.log(f"[{i}/{total_audios}] Áudio gerado com sucesso: {base_name}.mp3 ({file_size / (1024*1024):.2f} MB)", "OK")
+                    self.log(f"Áudio gerado via {provider.upper()} será usado no fluxo normal de renderização", "INFO")
                     success_count += 1
                 else:
                     self.log(f"[{i}/{total_audios}] Falha ao gerar: {base_name}.txt", "ERROR")
@@ -9723,15 +9866,22 @@ v2.0 (Versão Base)
                 self.current_video_label.configure(text="Aguardando...")
                 return
 
-        # Criar jobs (agora incluindo áudios gerados)
+        # Criar jobs (agora incluindo áudios gerados via TTS)
+        # IMPORTANTE: Após gerar áudios via TTS, fazer scan novamente para criar jobs com os áudios gerados
+        self.log("Escaneando pasta novamente para incluir áudios gerados via TTS...", "INFO")
         self.batch_jobs = self.scan_batch_folder()
 
         if not self.batch_jobs:
-            messagebox.showinfo("Aviso", "Nenhum audio novo encontrado para processar.")
+            messagebox.showinfo("Aviso", "Nenhum audio novo encontrado para processar.\n\nVerifique se:\n- Há arquivos de áudio na pasta de materiais\n- Ou arquivos TXT foram convertidos com sucesso via TTS")
             self.render_btn.configure(state="normal")
             self.cancel_btn.configure(state="disabled")
             self.current_video_label.configure(text="Aguardando...")
             return
+        
+        # Log de jobs criados (incluindo áudios gerados)
+        txt_jobs = sum(1 for j in self.batch_jobs if j.txt_path and not j.audio_path)
+        audio_jobs = sum(1 for j in self.batch_jobs if j.audio_path)
+        self.log(f"Jobs criados: {len(self.batch_jobs)} total ({audio_jobs} com áudio, {txt_jobs} apenas TXT)", "INFO")
 
         # Verificar se ha imagens suficientes (apenas se NÃO estiver no modo de geração de imagens ou modo backlog)
         video_mode = self.video_mode_var.get()

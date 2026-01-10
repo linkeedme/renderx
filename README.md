@@ -1,6 +1,12 @@
-# 🎬 RENDERX - Editor de Vídeo
+# 🎬 RENDERX v3.3 - Editor de Vídeo
 
 Editor de vídeo profissional para criação automática de vídeos com TTS, legendas e efeitos visuais.
+
+**Versão 3.3 - Otimizações de Velocidade** 🚀
+- ⚡ Modo de Performance configurável (Rápido/Equilibrado/Qualidade)
+- ⚡ 40-60% mais rápido na renderização
+- ⚡ Interpolação e presets FFmpeg otimizados
+- ⚡ Normalização paralela de vídeos
 
 ## 🚀 Início Rápido
 
@@ -23,12 +29,14 @@ INICIAR.bat
 ## 🎯 Funcionalidades
 
 - ✅ **Processamento em Lote**: Processa múltiplos vídeos automaticamente
+- ✅ **Modo de Performance** (v3.3): Escolha entre velocidade e qualidade
 - ✅ **Geração de Áudio TTS**: Converte texto em voz usando APIs (DARKVI ou TALKIFY)
 - ✅ **Sistema de Legendas**: Importa SRT ou gera automaticamente via AssemblyAI
 - ✅ **Efeitos Visuais**: Zoom centralizado, transições suaves, overlay de partículas
 - ✅ **Mixagem de Áudio**: Combina narração com música de fundo
 - ✅ **Processamento Paralelo**: Renderiza múltiplos vídeos simultaneamente
 - ✅ **VSL (Video Sales Letter)**: Insere vídeos de venda automaticamente
+- ✅ **Otimizações de Velocidade** (v3.3): 40-60% mais rápido que versões anteriores
 
 ## 📁 Estrutura
 

@@ -178,7 +178,7 @@ class OverlayManager:
                     "-filter_complex",
                     f"[1:v]format=rgba,colorchannelmixer=aa={opacity}[ov];"
                     f"[0:v][ov]overlay=0:0:format=auto",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
                     "-c:a", "copy",
                     output_path
                 ]
@@ -192,7 +192,7 @@ class OverlayManager:
                     "-filter_complex",
                     f"[1:v]format=rgba,colorchannelmixer=aa={opacity}[ov];"
                     f"[0:v][ov]overlay=0:0:shortest=1:format=auto",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
                     "-c:a", "copy",
                     output_path
                 ]
@@ -240,7 +240,7 @@ class OverlayManager:
                     "-i", overlay_path,
                     "-filter_complex",
                     "[0:v][1:v]blend=all_mode=screen:all_opacity=0.5",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
                     "-c:a", "copy",
                     output_path
                 ]
@@ -253,7 +253,7 @@ class OverlayManager:
                     "-filter_complex",
                     "[1:v]scale=iw:ih[ov];"
                     "[0:v][ov]blend=all_mode=screen:all_opacity=0.5:shortest=1",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
                     "-c:a", "copy",
                     output_path
                 ]

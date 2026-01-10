@@ -241,7 +241,7 @@ class CharacterManager:
             "-filter_complex", filter_complex,
             "-map", "[vout]",
             "-map", "0:a?",  # Mapear áudio do vídeo base se existir
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
             "-c:a", "copy",  # Copiar áudio sem re-encoding
             "-pix_fmt", "yuv420p",
             "-shortest",  # Para vídeo, garantir que termine quando o vídeo base terminar

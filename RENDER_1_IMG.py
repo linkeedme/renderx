@@ -1508,7 +1508,7 @@ class RenderV7(ctk.CTk):
 
             zoom_w = int(crop_w * zoom)
             zoom_h = int(crop_h * zoom)
-            img_zoomed = cv2.resize(img_processed, (zoom_w, zoom_h), interpolation=cv2.INTER_LANCZOS4)
+            img_zoomed = cv2.resize(img_processed, (zoom_w, zoom_h), interpolation=cv2.INTER_LINEAR)
 
             max_angle_rad = abs(amplitude_graus) * math.pi / 180.0
             rotation_factor = 1.0 / math.cos(max_angle_rad) if max_angle_rad > 0 else 1.0
@@ -1525,7 +1525,7 @@ class RenderV7(ctk.CTk):
             if final_h < height:
                 final_h = int(height * 1.1)
 
-            img_resized = cv2.resize(img_zoomed, (final_w, final_h), interpolation=cv2.INTER_LANCZOS4)
+            img_resized = cv2.resize(img_zoomed, (final_w, final_h), interpolation=cv2.INTER_LINEAR)
 
             temp_dir = tempfile.mkdtemp(prefix=f"v7_t{thread_id}_")
             temp_video_path = os.path.join(temp_dir, "pendulo_base_10s.mp4")
@@ -1684,7 +1684,7 @@ class RenderV7(ctk.CTk):
                     "-profile:v", "high"
                 ])
             else:
-                cmd.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "23"])
+                cmd.extend(["-c:v", "libx264", "-preset", "superfast", "-crf", "23"])
 
             cmd.extend([
                 "-t", "10",
@@ -1760,7 +1760,7 @@ class RenderV7(ctk.CTk):
                     "-profile:v", "high"
                 ])
             else:
-                cmd.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "23"])
+                cmd.extend(["-c:v", "libx264", "-preset", "superfast", "-crf", "23"])
 
             cmd.extend([
                 "-c:a", "aac",

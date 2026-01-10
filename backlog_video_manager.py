@@ -15,6 +15,7 @@ import shutil
 import time
 from typing import List, Optional, Dict, Tuple
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class BacklogVideoManager:
@@ -323,11 +324,11 @@ class BacklogVideoManager:
             f"fps=30"
         )
 
-        # Encoder args com FPS fixo
+        # Encoder args com FPS fixo (otimizado para velocidade)
         if use_gpu:
-            encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "3M", "-r", "30"]
+            encoder_args = ["-c:v", "h264_nvenc", "-preset", "p1", "-b:v", "3M", "-r", "30"]
         else:
-            encoder_args = ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "3M", "-r", "30", "-vsync", "cfr"]
+            encoder_args = ["-c:v", "libx264", "-preset", "superfast", "-b:v", "3M", "-r", "30", "-vsync", "cfr"]
 
         # Verificar se tem áudio
         has_audio = True
@@ -414,15 +415,41 @@ class BacklogVideoManager:
             normalized_videos = []
 
             if normalize:
-                # Normalizar todos os vídeos
-                self.log(f"Normalizando {len(video_paths)} vídeo(s)...", "INFO")
-                for i, video_path in enumerate(video_paths):
+                # Normalizar todos os vídeos em paralelo (otimizado para velocidade)
+                self.log(f"Normalizando {len(video_paths)} vídeo(s) em paralelo...", "INFO")
+                
+                # Função auxiliar para normalizar um vídeo
+                def normalize_single(args):
+                    i, video_path = args
                     normalized_path = os.path.join(temp_dir, f"normalized_{i:04d}.mp4")
                     normalized = self.normalize_video(video_path, normalized_path, resolution, use_gpu)
                     if normalized:
-                        normalized_videos.append(normalized)
+                        return (i, normalized)
                     else:
                         self.log(f"Falha ao normalizar vídeo {i+1}, pulando...", "WARN")
+                        return None
+                
+                # Processar em paralelo (usar até 4 threads para não sobrecarregar I/O)
+                max_workers = min(4, len(video_paths))
+                normalized_results = {}
+                
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(normalize_single, (i, video_path)): i 
+                        for i, video_path in enumerate(video_paths)
+                    }
+                    
+                    for future in as_completed(futures):
+                        result = future.result()
+                        if result:
+                            idx, normalized_path = result
+                            normalized_results[idx] = normalized_path
+                
+                # Ordenar por índice para manter ordem original
+                normalized_videos = [normalized_results[i] for i in sorted(normalized_results.keys())]
+                
+                if len(normalized_videos) < len(video_paths):
+                    self.log(f"Aviso: {len(normalized_videos)}/{len(video_paths)} vídeos normalizados com sucesso", "WARN")
             else:
                 normalized_videos = video_paths
 
@@ -438,11 +465,11 @@ class BacklogVideoManager:
                     safe_path = video_path.replace('\\', '/').replace("'", "'\\''")
                     f.write(f"file '{safe_path}'\n")
 
-            # Encoder args com FPS fixo para garantir consistência
+            # Encoder args com FPS fixo para garantir consistência (otimizado para velocidade)
             if use_gpu:
-                encoder_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "5M", "-r", "30"]
+                encoder_args = ["-c:v", "h264_nvenc", "-preset", "p1", "-b:v", "5M", "-r", "30"]
             else:
-                encoder_args = ["-c:v", "libx264", "-preset", "veryfast", "-b:v", "5M", "-r", "30"]
+                encoder_args = ["-c:v", "libx264", "-preset", "superfast", "-b:v", "5M", "-r", "30"]
 
             # Concatenar vídeos com FPS fixo e sincronização
             cmd = [

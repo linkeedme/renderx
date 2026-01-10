@@ -141,9 +141,9 @@ class KenBurnsEngine:
             # Fallback: usar imagem original e redimensionar com padding
             return self._resize_with_letterbox(img, target_w, target_h)
 
-        # Redimensionar para resolução alvo com LANCZOS4 (melhor qualidade)
+        # Redimensionar para resolução alvo com LINEAR (otimizado para velocidade)
         return cv2.resize(img_cropped, (target_w, target_h),
-                         interpolation=cv2.INTER_LANCZOS4)
+                         interpolation=cv2.INTER_LINEAR)
     
     def _resize_with_letterbox(self, img: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
         """
@@ -155,7 +155,7 @@ class KenBurnsEngine:
         new_w = int(w * scale)
         new_h = int(h * scale)
         
-        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
         
         # Criar canvas preto e centralizar
         canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
@@ -186,7 +186,7 @@ class KenBurnsEngine:
             M = cv2.getRotationMatrix2D(center, 0, scale)
             frame = cv2.warpAffine(
                 img_base, M, (width, height),
-                flags=cv2.INTER_LANCZOS4,
+                flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_REPLICATE
             )
             frames.append(frame)
@@ -209,7 +209,7 @@ class KenBurnsEngine:
             M = cv2.getRotationMatrix2D(center, 0, scale)
             frame = cv2.warpAffine(
                 img_base, M, (width, height),
-                flags=cv2.INTER_LANCZOS4,
+                flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_REPLICATE
             )
             frames.append(frame)
@@ -230,7 +230,7 @@ class KenBurnsEngine:
             M = cv2.getRotationMatrix2D(center, 0, scale)
             frame = cv2.warpAffine(
                 img_base, M, (width, height),
-                flags=cv2.INTER_LANCZOS4,
+                flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_REPLICATE
             )
             frames.append(frame)
@@ -249,7 +249,7 @@ class KenBurnsEngine:
         effective_pan = min(pan_amount * max(1.0, duration / 8.0), 0.4)
         pan_pixels = int(width * effective_pan)
         img_large = cv2.resize(img_base, (width + pan_pixels * 2, height),
-                              interpolation=cv2.INTER_LANCZOS4)
+                              interpolation=cv2.INTER_LINEAR)
         total_frames = int(duration * fps)
         frames = []
 
@@ -277,7 +277,7 @@ class KenBurnsEngine:
         effective_pan = min(pan_amount * max(1.0, duration / 8.0), 0.4)
         pan_pixels = int(width * effective_pan)
         img_large = cv2.resize(img_base, (width + pan_pixels * 2, height),
-                              interpolation=cv2.INTER_LANCZOS4)
+                              interpolation=cv2.INTER_LINEAR)
         total_frames = int(duration * fps)
         frames = []
 
@@ -297,7 +297,7 @@ class KenBurnsEngine:
         effective_pan = min(pan_amount * max(1.0, duration / 8.0), 0.4)
         pan_pixels = int(height * effective_pan)
         img_large = cv2.resize(img_base, (width, height + pan_pixels * 2),
-                              interpolation=cv2.INTER_LANCZOS4)
+                              interpolation=cv2.INTER_LINEAR)
         total_frames = int(duration * fps)
         frames = []
 
@@ -317,7 +317,7 @@ class KenBurnsEngine:
         effective_pan = min(pan_amount * max(1.0, duration / 8.0), 0.4)
         pan_pixels = int(height * effective_pan)
         img_large = cv2.resize(img_base, (width, height + pan_pixels * 2),
-                              interpolation=cv2.INTER_LANCZOS4)
+                              interpolation=cv2.INTER_LINEAR)
         total_frames = int(duration * fps)
         frames = []
 
@@ -351,7 +351,7 @@ class KenBurnsEngine:
             scale = 1.0 + (zoom_scale - 1.0) * t
             M = cv2.getRotationMatrix2D(center, 0, scale)
             zoomed = cv2.warpAffine(img_base, M, (width, height),
-                                   flags=cv2.INTER_LANCZOS4,
+                                   flags=cv2.INTER_LINEAR,
                                    borderMode=cv2.BORDER_REPLICATE)
             
             # Pan horizontal
@@ -379,7 +379,7 @@ class KenBurnsEngine:
             scale = 1.0 + (zoom_scale - 1.0) * t
             M = cv2.getRotationMatrix2D(center, 0, scale)
             zoomed = cv2.warpAffine(img_base, M, (width, height),
-                                   flags=cv2.INTER_LANCZOS4,
+                                   flags=cv2.INTER_LINEAR,
                                    borderMode=cv2.BORDER_REPLICATE)
             
             tx = int(pan_pixels * (0.5 - t) * 2)  # +pan_pixels a -pan_pixels
@@ -406,7 +406,7 @@ class KenBurnsEngine:
             scale = 1.0 + (zoom_scale - 1.0) * t
             M = cv2.getRotationMatrix2D(center, 0, scale)
             zoomed = cv2.warpAffine(img_base, M, (width, height),
-                                   flags=cv2.INTER_LANCZOS4,
+                                   flags=cv2.INTER_LINEAR,
                                    borderMode=cv2.BORDER_REPLICATE)
             
             ty = int(pan_pixels * (t - 0.5) * 2)
@@ -433,7 +433,7 @@ class KenBurnsEngine:
             scale = 1.0 + (zoom_scale - 1.0) * t
             M = cv2.getRotationMatrix2D(center, 0, scale)
             zoomed = cv2.warpAffine(img_base, M, (width, height),
-                                   flags=cv2.INTER_LANCZOS4,
+                                   flags=cv2.INTER_LINEAR,
                                    borderMode=cv2.BORDER_REPLICATE)
             
             ty = int(pan_pixels * (0.5 - t) * 2)
@@ -464,7 +464,7 @@ class KenBurnsEngine:
             scale = zoom_scale - (zoom_scale - 1.0) * t
             M = cv2.getRotationMatrix2D(center, 0, scale)
             zoomed = cv2.warpAffine(img_base, M, (width, height),
-                                   flags=cv2.INTER_LANCZOS4,
+                                   flags=cv2.INTER_LINEAR,
                                    borderMode=cv2.BORDER_REPLICATE)
             
             tx = int(pan_pixels * (t - 0.5) * 2)
@@ -491,7 +491,7 @@ class KenBurnsEngine:
             scale = zoom_scale - (zoom_scale - 1.0) * t
             M = cv2.getRotationMatrix2D(center, 0, scale)
             zoomed = cv2.warpAffine(img_base, M, (width, height),
-                                   flags=cv2.INTER_LANCZOS4,
+                                   flags=cv2.INTER_LINEAR,
                                    borderMode=cv2.BORDER_REPLICATE)
             
             tx = int(pan_pixels * (0.5 - t) * 2)
@@ -518,7 +518,7 @@ class KenBurnsEngine:
             scale = zoom_scale - (zoom_scale - 1.0) * t
             M = cv2.getRotationMatrix2D(center, 0, scale)
             zoomed = cv2.warpAffine(img_base, M, (width, height),
-                                   flags=cv2.INTER_LANCZOS4,
+                                   flags=cv2.INTER_LINEAR,
                                    borderMode=cv2.BORDER_REPLICATE)
             
             ty = int(pan_pixels * (t - 0.5) * 2)
@@ -545,7 +545,7 @@ class KenBurnsEngine:
             scale = zoom_scale - (zoom_scale - 1.0) * t
             M = cv2.getRotationMatrix2D(center, 0, scale)
             zoomed = cv2.warpAffine(img_base, M, (width, height),
-                                   flags=cv2.INTER_LANCZOS4,
+                                   flags=cv2.INTER_LINEAR,
                                    borderMode=cv2.BORDER_REPLICATE)
             
             ty = int(pan_pixels * (0.5 - t) * 2)
@@ -584,7 +584,7 @@ class KenBurnsEngine:
             M = cv2.getRotationMatrix2D(center, angle, scale)
             frame = cv2.warpAffine(
                 img_base, M, (width, height),
-                flags=cv2.INTER_LANCZOS4,
+                flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_REPLICATE
             )
             frames.append(frame)

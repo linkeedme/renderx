@@ -5657,6 +5657,12 @@ class FinalSlideshowApp(ctk.CTk):
         self.image_system = None
         self.workers = []
         self.jobs_lock = threading.Lock()
+        
+        # Sistema de timer
+        self.timer_running = False
+        self.timer_start_time = None
+        self.timer_var = ctk.StringVar(value="00:00:00")
+        self.timer_update_id = None
 
         # Variaveis CTk - Pastas do Lote
         self.batch_input_var = ctk.StringVar(value=self.config.get("batch_input_folder", ""))
@@ -6103,9 +6109,9 @@ class FinalSlideshowApp(ctk.CTk):
         status_backlog_frame = ctk.CTkFrame(self.backlog_config_frame, fg_color="transparent")
         status_backlog_frame.pack(fill="x", padx=15, pady=5)
         ctk.CTkLabel(status_backlog_frame, text="Status:", text_color=CORES["text_dim"]).pack(side="left")
-        backlog_status_label = ctk.CTkLabel(status_backlog_frame, textvariable=self.backlog_mode_status_var,
-                                            text_color=CORES["text"])
-        backlog_status_label.pack(side="left", padx=5)
+        self.backlog_mode_status_label = ctk.CTkLabel(status_backlog_frame, textvariable=self.backlog_mode_status_var,
+                                                       text_color=CORES["text"])
+        self.backlog_mode_status_label.pack(side="left", padx=5)
         
         # Info sobre pasta USADOS
         ctk.CTkLabel(
@@ -7086,51 +7092,8 @@ class FinalSlideshowApp(ctk.CTk):
             text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
         ).pack(anchor="w", padx=10, pady=(5, 10))
 
-        # ===== PAINEL MODO BACKLOG COMPLETO =====
-        self.backlog_mode_frame_video = ctk.CTkFrame(section, fg_color=CORES["bg_dark"], corner_radius=8)
-        
-        ctk.CTkLabel(
-            self.backlog_mode_frame_video, text="Opções do Modo Backlog Completo",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=CORES["text_dim"]
-        ).pack(anchor="w", padx=10, pady=(10, 5))
-        
-        # Descrição
-        ctk.CTkLabel(
-            self.backlog_mode_frame_video,
-            text="Vídeos do backlog são concatenados sem transições para cobrir toda duração do áudio",
-            text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
-        ).pack(anchor="w", padx=10, pady=(0, 10))
-        
-        # Frame de pasta do backlog
-        backlog_pasta_frame = ctk.CTkFrame(self.backlog_mode_frame_video, fg_color="transparent")
-        backlog_pasta_frame.grid_columnconfigure(1, weight=1)
-        backlog_pasta_frame.pack(fill="x", padx=10, pady=5)
-        
-        ctk.CTkLabel(backlog_pasta_frame, text="Pasta do Backlog:", text_color=CORES["text"]).grid(
-            row=0, column=0, sticky="w", padx=(0, 5), pady=5)
-        ctk.CTkEntry(backlog_pasta_frame, textvariable=self.backlog_mode_folder_var,
-                    fg_color=CORES["bg_input"], border_color=CORES["accent"]).grid(
-            row=0, column=1, sticky="ew", padx=5, pady=5)
-        ctk.CTkButton(backlog_pasta_frame, text="...", width=40, fg_color=CORES["accent"],
-                     command=self.select_backlog_mode_folder).grid(row=0, column=2, padx=5, pady=5)
-        
-        # Status do backlog
-        status_backlog_video_frame = ctk.CTkFrame(self.backlog_mode_frame_video, fg_color="transparent")
-        status_backlog_video_frame.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(status_backlog_video_frame, text="Status:", text_color=CORES["text_dim"]).pack(side="left")
-        self.backlog_mode_status_label_video = ctk.CTkLabel(status_backlog_video_frame, textvariable=self.backlog_mode_status_var,
-                                                      text_color=CORES["text"])
-        self.backlog_mode_status_label_video.pack(side="left", padx=5)
-        
-        # Info sobre pasta USADOS
-        ctk.CTkLabel(
-            self.backlog_mode_frame_video,
-            text="(Vídeos usados são movidos automaticamente para pasta USADOS)",
-            text_color=CORES["text_dim"], font=ctk.CTkFont(size=10)
-        ).pack(anchor="w", padx=10, pady=(0, 10))
-
-        # Mostrar painel correto
+        # Painel Backlog removido daqui - agora está em create_backlog_config_section() separadamente
+        # Mostrar painel correto baseado no modo selecionado
         self.toggle_video_mode()
 
     def toggle_video_mode(self):
@@ -7142,31 +7105,30 @@ class FinalSlideshowApp(ctk.CTk):
         self.srt_mode_frame.pack_forget()
         if hasattr(self, 'single_image_mode_frame'):
             self.single_image_mode_frame.pack_forget()
-        if hasattr(self, 'backlog_mode_frame_video'):
-            self.backlog_mode_frame_video.pack_forget()
+        # backlog_mode_frame_video removido - agora está em create_backlog_config_section()
         
         # Atualizar use_backlog_mode_var automaticamente baseado no modo selecionado
         if mode == "backlog":
             # Modo backlog completo ativado
             if hasattr(self, 'use_backlog_mode_var'):
                 self.use_backlog_mode_var.set(True)
-            if hasattr(self, 'backlog_mode_frame_video'):
-                self.backlog_mode_frame_video.pack(fill="x", padx=15, pady=(5, 10))
-                # Configurar trace para atualizar status quando pasta mudar
-                if hasattr(self, 'backlog_mode_folder_var'):
-                    try:
-                        # Remover trace anterior se existir
-                        if hasattr(self, '_backlog_mode_trace_id'):
-                            try:
-                                self.backlog_mode_folder_var.trace_remove("write", self._backlog_mode_trace_id)
-                            except:
-                                pass
-                        # Adicionar novo trace
-                        self._backlog_mode_trace_id = self.backlog_mode_folder_var.trace_add("write", lambda *args: self.update_backlog_mode_status())
-                    except:
-                        pass
-                # Atualizar status imediatamente
-                self.update_backlog_mode_status()
+            # Atualizar status do backlog (agora na seção separada)
+            if hasattr(self, 'backlog_config_frame'):
+                self.toggle_backlog_mode_panel()
+            if hasattr(self, 'backlog_mode_folder_var'):
+                try:
+                    # Remover trace anterior se existir
+                    if hasattr(self, '_backlog_mode_trace_id'):
+                        try:
+                            self.backlog_mode_folder_var.trace_remove("write", self._backlog_mode_trace_id)
+                        except:
+                            pass
+                    # Adicionar novo trace
+                    self._backlog_mode_trace_id = self.backlog_mode_folder_var.trace_add("write", lambda *args: self.update_backlog_mode_status())
+                except:
+                    pass
+            # Atualizar status imediatamente
+            self.update_backlog_mode_status()
         else:
             # Outros modos - desativar modo backlog completo
             if hasattr(self, 'use_backlog_mode_var'):
@@ -8596,13 +8558,10 @@ class FinalSlideshowApp(ctk.CTk):
         except Exception as e:
             self.log(f"Erro ao contar vídeos do backlog: {e}", "WARN")
         
-        if hasattr(self, 'backlog_mode_status_label_video'):
-            if video_count > 0:
-                self.backlog_mode_status_var.set(f"{video_count} vídeos disponíveis")
-                self.backlog_mode_status_label_video.configure(text_color=CORES["success"])
-            else:
-                self.backlog_mode_status_var.set("Nenhum vídeo disponível")
-                self.backlog_mode_status_label_video.configure(text_color=CORES["warning"])
+        if video_count > 0:
+            self.backlog_mode_status_var.set(f"{video_count} vídeos disponíveis")
+        else:
+            self.backlog_mode_status_var.set("Nenhum vídeo disponível")
 
     def toggle_character_options(self):
         """Mostra/oculta opções de personagem."""
@@ -8885,36 +8844,75 @@ class FinalSlideshowApp(ctk.CTk):
 
         # Container interno para centralizar
         inner_frame = ctk.CTkFrame(btn_frame, fg_color="transparent")
-        inner_frame.pack(pady=15 if compact else 20)
+        inner_frame.pack(pady=8 if compact else 12)
 
         self.render_btn = ctk.CTkButton(
             inner_frame,
             text="▶  INICIAR LOTE",
-            font=ctk.CTkFont(size=16 if compact else 15, weight="bold"),
+            font=ctk.CTkFont(size=12, weight="bold"),
             fg_color=CORES["success"],
             hover_color="#2EA043",
             text_color="#FFFFFF",
-            height=60 if compact else 50,
-            width=250 if compact else 200,
-            corner_radius=10,
+            height=38,
+            width=180,
+            corner_radius=8,
             command=self.start_batch_render
         )
-        self.render_btn.pack(side="left", padx=15)
+        self.render_btn.pack(side="left", padx=8)
 
         self.cancel_btn = ctk.CTkButton(
             inner_frame,
             text="⏹  CANCELAR",
-            font=ctk.CTkFont(size=13, weight="bold"),
+            font=ctk.CTkFont(size=11, weight="bold"),
             fg_color=CORES["bg_hover"],
             hover_color=CORES["error"],
             text_color=CORES["text_dim"],
-            height=60 if compact else 50,
-            width=150,
-            corner_radius=10,
+            height=38,
+            width=110,
+            corner_radius=8,
             state="disabled",
             command=self.cancel_batch
         )
-        self.cancel_btn.pack(side="left", padx=15)
+        self.cancel_btn.pack(side="left", padx=8)
+        
+        # Timer ao lado do botão cancelar
+        self.timer_label = ctk.CTkLabel(
+            inner_frame,
+            textvariable=self.timer_var,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=CORES["accent"],
+            width=80
+        )
+        self.timer_label.pack(side="left", padx=(8, 0))
+
+    def start_timer(self):
+        """Inicia o timer quando o lote começa."""
+        self.timer_running = True
+        self.timer_start_time = time.time()
+        self.timer_var.set("00:00:00")
+        self._update_timer()
+    
+    def stop_timer(self):
+        """Para o timer quando o lote termina."""
+        self.timer_running = False
+        if self.timer_update_id:
+            self.after_cancel(self.timer_update_id)
+            self.timer_update_id = None
+    
+    def _update_timer(self):
+        """Atualiza o display do timer."""
+        if not self.timer_running:
+            return
+        
+        if self.timer_start_time:
+            elapsed = time.time() - self.timer_start_time
+            hours = int(elapsed // 3600)
+            minutes = int((elapsed % 3600) // 60)
+            seconds = int(elapsed % 60)
+            self.timer_var.set(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        
+        # Agendar próxima atualização (a cada 1 segundo)
+        self.timer_update_id = self.after(1000, self._update_timer)
 
     def create_progress_section(self, compact=False):
         """Secao de progresso premium com barras individual e total."""
@@ -9071,7 +9069,7 @@ class FinalSlideshowApp(ctk.CTk):
         parent_frame = self.tab_main if compact else self.main_scroll
         log_frame = ctk.CTkFrame(parent_frame, fg_color=CORES["bg_section"], corner_radius=12, border_width=1, border_color=CORES["border"])
         if compact:
-            log_frame.grid(row=4, column=0, sticky="nsew", padx=15, pady=(8, 15))  # Mais padding inferior
+            log_frame.grid(row=4, column=0, sticky="nsew", padx=15, pady=(8, 25))  # Margem inferior aumentada
             log_frame.grid_rowconfigure(1, weight=1)  # Text widget expande
             log_frame.grid_columnconfigure(0, weight=1)  # Garantir expansão horizontal
         else:
@@ -9135,10 +9133,12 @@ class FinalSlideshowApp(ctk.CTk):
         )
         if compact:
             # No modo compacto, usar grid com sticky="nsew" para expandir completamente
-            # Padding reduzido para maximizar espaço do log
-            self.log_text.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 15))
+            # Padding adequado para não cortar conteúdo - mais espaço na parte inferior
+            self.log_text.grid(row=1, column=0, sticky="nsew", padx=15, pady=(0, 20))
             # Garantir que o frame do log também expanda completamente
             log_frame.grid_rowconfigure(1, weight=1, minsize=200)
+            # Configurar para garantir que o texto não seja cortado
+            log_frame.grid_columnconfigure(0, weight=1)
         else:
             self.log_text.pack(fill="both", expand=True, padx=15, pady=(0, 15))
         
@@ -10562,6 +10562,9 @@ v2.0 (Versão Base)
         # Desabilitar botões imediatamente para feedback visual
         self.render_btn.configure(state="disabled")
         self.cancel_btn.configure(state="normal")
+        
+        # Iniciar timer
+        self.start_timer()
 
         # Se TTS está habilitado, gerar áudios em thread separada primeiro
         if self.tts_enabled_var.get():
@@ -10598,6 +10601,7 @@ v2.0 (Versão Base)
                 self.render_btn.configure(state="normal")
                 self.cancel_btn.configure(state="disabled")
                 self.current_video_label.configure(text="Aguardando...")
+                self.stop_timer()  # Parar timer se cancelar antes de iniciar
                 return
 
         # Criar jobs (agora incluindo áudios gerados via TTS)
@@ -10610,6 +10614,7 @@ v2.0 (Versão Base)
             self.render_btn.configure(state="normal")
             self.cancel_btn.configure(state="disabled")
             self.current_video_label.configure(text="Aguardando...")
+            self.stop_timer()  # Parar timer se não houver jobs
             return
         
         # Log de jobs criados (incluindo áudios gerados)
@@ -10649,6 +10654,7 @@ v2.0 (Versão Base)
                 ):
                     self.render_btn.configure(state="normal")
                     self.cancel_btn.configure(state="disabled")
+                    self.stop_timer()  # Parar timer se cancelar antes de iniciar
                     return
 
         # Resetar estado
@@ -10701,6 +10707,9 @@ v2.0 (Versão Base)
             self.log("+================================================+")
             self.log(f"Concluidos: {done} | Erros: {errors}")
 
+            # Parar timer
+            self.after(0, lambda: self.stop_timer())
+            
             self.after(0, lambda: self.render_btn.configure(state="normal"))
             self.after(0, lambda: self.cancel_btn.configure(state="disabled"))
 
@@ -10715,6 +10724,8 @@ v2.0 (Versão Base)
     def cancel_batch(self):
         """Cancela o processamento em lote."""
         self.cancel_requested = True
+        # Parar timer
+        self.stop_timer()
         self.log("[!] Cancelamento solicitado... Aguardando workers...")
 
 # =============================================================================

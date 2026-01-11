@@ -155,6 +155,7 @@ class OverlayManager:
                      output_path: str, opacity: float = 0.3) -> Optional[str]:
         """
         Aplica overlay ao vídeo usando FFmpeg.
+        VERSÃO OTIMIZADA: Usa preset mais rápido, threads e detecção de GPU.
 
         Args:
             video_path: Caminho do vídeo base
@@ -169,31 +170,55 @@ class OverlayManager:
         overlay_type = overlay_info["type"]
 
         try:
+            # Verificar se GPU está disponível
+            use_gpu = False
+            try:
+                result = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-encoders"],
+                    capture_output=True,
+                    text=True
+                )
+                use_gpu = "h264_nvenc" in result.stdout or "h264_qsv" in result.stdout
+            except:
+                pass
+            
+            # OTIMIZAÇÃO: Usar preset mais rápido para overlay
+            if use_gpu:
+                encoder_args = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "28"]
+            else:
+                encoder_args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"]
+            
             if overlay_type == "image":
-                # Overlay de imagem PNG (estático)
+                # Overlay de imagem PNG (estático) - OTIMIZADO
                 cmd = [
                     "ffmpeg", "-y",
+                    "-threads", "0",  # Usar todos os threads disponíveis
                     "-i", video_path,
+                    "-loop", "1",  # Loop da imagem (mais eficiente)
                     "-i", overlay_path,
                     "-filter_complex",
                     f"[1:v]format=rgba,colorchannelmixer=aa={opacity}[ov];"
                     f"[0:v][ov]overlay=0:0:format=auto",
-                    "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
+                    *encoder_args,
                     "-c:a", "copy",
+                    "-pix_fmt", "yuv420p",
+                    "-shortest",  # Terminar quando o vídeo principal terminar
                     output_path
                 ]
             else:
-                # Overlay de vídeo (com loop)
+                # Overlay de vídeo (com loop) - OTIMIZADO
                 cmd = [
                     "ffmpeg", "-y",
+                    "-threads", "0",  # Usar todos os threads disponíveis
                     "-i", video_path,
                     "-stream_loop", "-1",  # Loop infinito
                     "-i", overlay_path,
                     "-filter_complex",
                     f"[1:v]format=rgba,colorchannelmixer=aa={opacity}[ov];"
                     f"[0:v][ov]overlay=0:0:shortest=1:format=auto",
-                    "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
+                    *encoder_args,
                     "-c:a", "copy",
+                    "-pix_fmt", "yuv420p",
                     output_path
                 ]
 
@@ -220,6 +245,7 @@ class OverlayManager:
                                    output_path: str) -> Optional[str]:
         """
         Aplica overlay com blend mode 'screen' (ideal para luz/partículas).
+        VERSÃO OTIMIZADA: Usa preset mais rápido e threads.
 
         Args:
             video_path: Caminho do vídeo base
@@ -233,28 +259,52 @@ class OverlayManager:
         overlay_type = overlay_info["type"]
 
         try:
+            # Verificar se GPU está disponível
+            use_gpu = False
+            try:
+                result = subprocess.run(
+                    ["ffmpeg", "-hide_banner", "-encoders"],
+                    capture_output=True,
+                    text=True
+                )
+                use_gpu = "h264_nvenc" in result.stdout or "h264_qsv" in result.stdout
+            except:
+                pass
+            
+            # OTIMIZAÇÃO: Usar preset mais rápido
+            if use_gpu:
+                encoder_args = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "28"]
+            else:
+                encoder_args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"]
+            
             if overlay_type == "image":
                 cmd = [
                     "ffmpeg", "-y",
+                    "-threads", "0",  # Usar todos os threads disponíveis
                     "-i", video_path,
+                    "-loop", "1",  # Loop da imagem (mais eficiente)
                     "-i", overlay_path,
                     "-filter_complex",
                     "[0:v][1:v]blend=all_mode=screen:all_opacity=0.5",
-                    "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
+                    *encoder_args,
                     "-c:a", "copy",
+                    "-pix_fmt", "yuv420p",
+                    "-shortest",  # Terminar quando o vídeo principal terminar
                     output_path
                 ]
             else:
                 cmd = [
                     "ffmpeg", "-y",
+                    "-threads", "0",  # Usar todos os threads disponíveis
                     "-i", video_path,
                     "-stream_loop", "-1",
                     "-i", overlay_path,
                     "-filter_complex",
                     "[1:v]scale=iw:ih[ov];"
                     "[0:v][ov]blend=all_mode=screen:all_opacity=0.5:shortest=1",
-                    "-c:v", "libx264", "-preset", "superfast", "-crf", "23",
+                    *encoder_args,
                     "-c:a", "copy",
+                    "-pix_fmt", "yuv420p",
                     output_path
                 ]
 

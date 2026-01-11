@@ -1411,6 +1411,7 @@ class FinalSlideshowEngine:
     def apply_overlay(self, video_path, overlay_path, output_path, opacity=0.3):
         """
         Aplica overlay com blend screen (remove preto) em toda a duração do vídeo.
+        VERSÃO OTIMIZADA: Usa preset mais rápido, threads e otimizações específicas.
         
         NOTA: Esta função é usada apenas para casos especiais (backlog intro, etc).
         Para células individuais, use apply_overlay_to_clip() que é muito mais rápido.
@@ -1418,8 +1419,20 @@ class FinalSlideshowEngine:
         self.log(f"Aplicando overlay (opacidade: {opacity:.0%})...", "INFO")
 
         use_gpu = self.check_gpu_available()
-        encoder_args = self.get_encoder_args({}, use_gpu)  # Config padrão para overlay
-
+        
+        # OTIMIZAÇÃO: Usar preset mais rápido para overlay (prioridade: velocidade)
+        # Para overlay, não precisamos de alta qualidade, apenas velocidade
+        if use_gpu:
+            # GPU: usar p1 (mais rápido) ao invés de p2
+            encoder_args = ["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "28"]
+        else:
+            # CPU: usar ultrafast ao invés de superfast
+            encoder_args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"]
+        
+        # Detectar se overlay é imagem estática (PNG) ou vídeo
+        overlay_ext = os.path.splitext(overlay_path)[1].lower()
+        is_static_image = overlay_ext in ['.png', '.jpg', '.jpeg']
+        
         # Obter duração do vídeo principal
         video_duration = self.get_video_duration(video_path)
         if video_duration is None:
@@ -1434,24 +1447,52 @@ class FinalSlideshowEngine:
             # Fallback: assumir 720p
             video_width, video_height = 1280, 720
 
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-stream_loop", "-1",
-            "-i", overlay_path,
-            "-filter_complex",
-            # Processar overlay: ajustar resolução e aplicar opacidade
-            f"[1:v]scale={video_width}:{video_height}:force_original_aspect_ratio=decrease,"
-            f"pad={video_width}:{video_height}:(ow-iw)/2:(oh-ih)/2:color=black@0,"
-            f"format=rgba,colorchannelmixer=aa={opacity}[ov];"
-            # Aplicar overlay acima do vídeo (overlay normal preserva cores do vídeo base)
-            f"[0:v][ov]overlay=0:0:eof_action=pass[out]",
-            "-map", "[out]",
-            "-map", "0:a?",  # Mapear áudio do vídeo principal se existir
-            *encoder_args,
-            "-c:a", "copy",  # Copiar áudio sem re-encoding
-            "-pix_fmt", "yuv420p",
-        ]
+        # OTIMIZAÇÃO: Para imagem estática, usar método mais simples e rápido
+        if is_static_image:
+            # Imagem PNG: não precisa de stream_loop, processamento mais direto
+            filter_complex = (
+                f"[1:v]scale={video_width}:{video_height}:force_original_aspect_ratio=decrease,"
+                f"pad={video_width}:{video_height}:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+                f"format=rgba,colorchannelmixer=aa={opacity}[ov];"
+                f"[0:v][ov]overlay=0:0:format=auto[out]"
+            )
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-threads", "0",  # Usar todos os threads disponíveis
+                "-i", video_path,
+                "-loop", "1",  # Loop da imagem (mais eficiente que stream_loop para imagens)
+                "-i", overlay_path,
+                "-filter_complex", filter_complex,
+                "-map", "[out]",
+                "-map", "0:a?",  # Mapear áudio do vídeo principal se existir
+                *encoder_args,
+                "-c:a", "copy",  # Copiar áudio sem re-encoding
+                "-pix_fmt", "yuv420p",
+                "-shortest",  # Terminar quando o vídeo principal terminar
+            ]
+        else:
+            # Vídeo overlay: usar stream_loop
+            filter_complex = (
+                f"[1:v]scale={video_width}:{video_height}:force_original_aspect_ratio=decrease,"
+                f"pad={video_width}:{video_height}:(ow-iw)/2:(oh-ih)/2:color=black@0,"
+                f"format=rgba,colorchannelmixer=aa={opacity}[ov];"
+                f"[0:v][ov]overlay=0:0:eof_action=pass[out]"
+            )
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-threads", "0",  # Usar todos os threads disponíveis
+                "-i", video_path,
+                "-stream_loop", "-1",
+                "-i", overlay_path,
+                "-filter_complex", filter_complex,
+                "-map", "[out]",
+                "-map", "0:a?",  # Mapear áudio do vídeo principal se existir
+                *encoder_args,
+                "-c:a", "copy",  # Copiar áudio sem re-encoding
+                "-pix_fmt", "yuv420p",
+            ]
         
         # Se temos duração conhecida, limitar pela duração do vídeo principal
         if video_duration and video_duration > 0:

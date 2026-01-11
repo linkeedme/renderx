@@ -56,6 +56,12 @@ _LEGADO_LICENCAS/
 render3.2.zip
 RENDERX_v3.2_dist.zip
 
+# Build PyInstaller
+build/
+dist/
+*.spec
+*.exe
+
 # Arquivos de licença local
 license.dat
 .license
